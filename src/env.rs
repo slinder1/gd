@@ -34,6 +34,7 @@ impl ThreadLocalRepo {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Config {
     remote: String,
+    tag_remote: String,
     base_branch: String,
     user_branch_prefix: String,
     reviewer_groups: Option<HashMap<String, Vec<String>>>,
@@ -86,6 +87,9 @@ pub fn validate() -> Result<()> {
     if remote().is_empty() {
         bail!("field `remote` cannot be empty");
     }
+    if tag_remote().is_empty() {
+        bail!("field `tag_remote` cannot be empty");
+    }
     if base_branch().is_empty() {
         bail!("field `base_branch` cannot be empty");
     }
@@ -104,6 +108,13 @@ pub fn remote() -> &'static str {
         .remote
         .as_deref()
         .unwrap_or(CONFIG.remote.as_str())
+}
+
+pub fn tag_remote() -> &'static str {
+    CLI.globals
+        .tag_remote
+        .as_deref()
+        .unwrap_or(CONFIG.tag_remote.as_str())
 }
 
 pub fn base_branch() -> &'static str {

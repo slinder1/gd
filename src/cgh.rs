@@ -119,6 +119,12 @@ fn push(cfg: &cli::Push) -> Result<()> {
         .context("could not build diffs")?;
     LocalChange::push_all(any_changes.iter().map(|ac| ac.local_change()))
         .context("could not push all local changes")?;
+    any_changes
+        .first()
+        .context("no local changes to tag")?
+        .local_change()
+        .push_tag()
+        .context("could not push tag for final local change")?;
     // FIXME: Should try to restore the original branch contents if we fail from this point on. It
     // would be at least an attempt at being "atomic" about the push, and it would mean we don't
     // lose the interdiff in a future re-run.

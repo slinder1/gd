@@ -74,6 +74,10 @@ pub struct Globals {
     /// The name of the git remote corresponding to the GitHub repo to operate on.
     #[arg(long, global = true)]
     pub remote: Option<String>,
+    /// The name of the git remote corresponding to the GitHub repo to push one tag per stack
+    /// revision, to retain history after force-pushes.
+    #[arg(long, global = true)]
+    pub tag_remote: Option<String>,
     /// The branch on `remote` which acts as the "base" branch, which all PRs are ultimately
     /// relative to.
     #[arg(long, global = true)]
@@ -101,13 +105,15 @@ pub enum Command {
     ///
     /// The commits `${base}..HEAD` must each have a `Change-Id:` trailer. Each commit will be
     /// force-pushed to a corresponding branch named `${user_branch_prefix}${change_id}` on
-    /// `${remote}`. Each commit will be matched to its existing PR or else a new PR will be
+    /// `${remote}`. A tag named `${user_branch_prefix}${final_commit_oid}` will also be pushed to
+    /// `${tag_remote}`. Each commit will be matched to its existing PR or else a new PR will be
     /// created for it. The PRs will be "stacked" such that they reproduce the local branch
     /// sequence, with additional trailers in the PR message body to help reviewers navigate the
     /// stack.
     ///
     /// Note: This command will never modify your commits or refs, even their messages. No local
-    /// branches are created or destroyed. All mutation occurs exclusively on the `$remote`.
+    /// branches are created or destroyed. All mutation occurs exclusively on `$remote` and
+    /// `$tag_remote`.
     #[command(visible_alias = "p")]
     Push(Push),
     /// With no arguments, print the current stack's short-name. With an argument, set it.

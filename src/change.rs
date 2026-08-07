@@ -81,11 +81,17 @@ impl LocalChange {
         let remote_branch_ref = self.remote_branch_ref();
         format!("{oid}:{remote_branch_ref}")
     }
+    pub fn tag_refspec(&self) -> String {
+        let oid = self.oid;
+        let tag_name = format!("{}{oid}", env::user_branch_prefix());
+        format!("{oid}:refs/tags/{tag_name}")
+    }
     pub fn push_all<'a, I: Iterator<Item = &'a Self>>(iterator: I) -> Result<()> {
-        let refspecs: Vec<String> = iterator.map(|lc| lc.push_refspec()).collect();
-        if refspecs.is_empty() {
+        let local_changes: Vec<&Self> = iterator.collect();
+        if local_changes.is_empty() {
             bail!("no refs to push");
         }
+        let refspecs: Vec<String> = local_changes.iter().map(|lc| lc.push_refspec()).collect();
         let mut cmd = Command::new("git");
         let mut args = vec![
             "push".to_string(),
@@ -95,6 +101,13 @@ impl LocalChange {
         ];
         args.extend(refspecs);
         cmd.args(args);
+        exec!(dry_return = (), cmd);
+        Ok(())
+    }
+    pub fn push_tag(&self) -> Result<()> {
+        let tag_refspec = self.tag_refspec();
+        let mut cmd = Command::new("git");
+        cmd.args(["push", env::tag_remote(), "--atomic", tag_refspec.as_str()]);
         exec!(dry_return = (), cmd);
         Ok(())
     }
