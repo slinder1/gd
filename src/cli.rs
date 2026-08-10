@@ -8,7 +8,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 ///   mirror it to GitHub by: fetching remote tracking branches, force-pushing namespaced refs,
 ///   creating PRs, and maintaining PR bodies and comments to present a pseudo-UI for the stack. If
 ///   you use the `merge` subcommand, it also touches namespaced git-config entries under
-///   `branch.<name>.cgh-*`, but this is only for optional features.
+///   `branch.<name>.praddle-*`, but this is only for optional features.
 /// * Treats one branch as one patch-stack, where each commit maps 1:1 to a PR.
 /// * Uses the same "Change-Id" trailer used by Gerrit. You can install the commit-msg hook from
 ///   a Gerrit instance or use the install-hook subcommand to install an embedded copy.
@@ -32,7 +32,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 ///   stale with no relation to the latest patch contents. This seems to happen frequently anyway,
 ///   and avoiding it in the general case requires never rebasing which is not viable for anything
 ///   but an extremely short-lived review process. Ideas about how to potentially resolve this is
-///   documented at https://github.com/slinder1/cgh/blob/main/IDEAS.md and contributions are
+///   documented at https://github.com/slinder1/praddle/blob/main/IDEAS.md and contributions are
 ///   welcome!
 /// * Can lose track of merged/closed PR if the user is not careful to use the `merge` subcommand.
 ///   This may be mildly confusing, but is more-or-less by design: the change commit which corresponds
@@ -43,10 +43,10 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 ///
 /// It reads configuration from the first of the following:
 ///
-/// * The file identified by the environment variable `CGH_CONFIG_PATH`, if that variable is set.
-/// * The file `.cgh.toml` in the git repo's workdir, if it exists.
-/// * The file `cgh.toml` in the git repo's workdir, if it exists.
-/// * The file `cgh.toml` in platform-dependant user config dir, otherwise.
+/// * The file identified by the environment variable `PRADDLE_CONFIG_PATH`, if that variable is set.
+/// * The file `.praddle.toml` in the git repo's workdir, if it exists.
+/// * The file `praddle.toml` in the git repo's workdir, if it exists.
+/// * The file `praddle.toml` in platform-dependant user config dir, otherwise.
 ///
 /// An example config file is:
 ///
@@ -81,7 +81,7 @@ pub struct Globals {
     /// The prefix for all remote branches created by the tool. Can be empty.
     #[arg(long, global = true)]
     pub user_branch_prefix: Option<String>,
-    /// Limit the global thread pool used by `cgh` to have only one thread.
+    /// Limit the global thread pool used by `praddle` to have only one thread.
     #[arg(long, global = true)]
     pub serial: bool,
     /// Give a verbose summary of what would happen if executed.
@@ -112,18 +112,18 @@ pub enum Command {
     Push(Push),
     /// With no arguments, print the current stack's short-name. With an argument, set it.
     ///
-    /// The short-name is tracked in the `branch.<name>.cgh-shortName` git config entry,
+    /// The short-name is tracked in the `branch.<name>.praddle-shortName` git config entry,
     /// and is used to prefix the PR title, e.g. `[${short-name} 3/5] ...`
     Name(Name),
     /// Merge the next change.
     ///
-    /// If successful, this will modify the local `branch.<name>.cgh-mergedChangeIds` git config
-    /// entry to record that the change was merged. This allows future `cgh push`es to include
+    /// If successful, this will modify the local `branch.<name>.praddle-mergedChangeIds` git config
+    /// entry to record that the change was merged. This allows future `praddle push`es to include
     /// merged changes in the reviewer stack "UI", keeping the relative numbering of changes stable.
     ///
     /// If a change's PR is merged in any other way, it will "disappear" from the stack, affecting
     /// all downstream numbering and the total number of changes in the stack. If you want to
-    /// manually correct this, edit `branch.<name>.cgh-mergedChangeIds` (a ':' separated list) using
+    /// manually correct this, edit `branch.<name>.praddle-mergedChangeIds` (a ':' separated list) using
     /// e.g. `git config --edit` and append the merged change's ID to the list (or create it, if it
     /// does not already exist).
     ///

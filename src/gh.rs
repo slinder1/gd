@@ -75,6 +75,10 @@ lazy_static! {
     static ref REPO_URL: String = build_repo_url().extract();
     static ref REPO_ARG: String = format!("--repo={}", REPO_URL.as_str());
 }
+// FIXME: Newer rustc has started complaining about some of the types
+// used through lazy_static, the plan is to remove most uses of
+// lazy_static anyway so just bandaiding it for now.
+#[allow(dead_code)]
 // FIXME: this pseudo-parsing seems wrong, but just getting it working for me first
 fn build_repo_url() -> Result<String> {
     let remote = env::repo()

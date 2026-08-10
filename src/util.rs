@@ -95,7 +95,7 @@ impl<'repo> BranchConfig<'repo> {
         })
     }
     fn format_key(&self, key: &str) -> String {
-        format!("branch.{}.cgh-{key}", self.branch_name)
+        format!("branch.{}.praddle-{key}", self.branch_name)
     }
     pub fn get(&self, key: &str) -> Result<String> {
         let config_key = self.format_key(key);
