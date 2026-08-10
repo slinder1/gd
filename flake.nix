@@ -1,51 +1,72 @@
 {
-  description = "GitHub stacked-PR builder for those who miss Gerrit";
+  description = "Building static binaries with musl";
 
   inputs = {
-    nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz";
-    flake-parts.url = "github:hercules-ci/flake-parts";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+    crane.url = "github:ipetkov/crane";
+
+    flake-utils.url = "github:numtide/flake-utils";
+
   };
 
   outputs =
-    inputs@{
-      flake-parts,
+    {
+      self,
+      nixpkgs,
+      crane,
+      flake-utils,
       ...
     }:
-    flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = inputs.nixpkgs.lib.systems.flakeExposed;
-      perSystem =
-        { pkgs, lib, ... }:
-        let
-          toml = (lib.importTOML ./Cargo.toml).package;
-        in
-        {
-          packages = rec {
-            praddle = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
-              pname = toml.name;
-              inherit (toml) version;
-              cargoLock = {
-                lockFile = ./Cargo.lock;
-                allowBuiltinFetchGit = true;
-              };
-              src = ./.;
-              nativeBuildInputs = [
-                pkgs.installShellFiles
-                pkgs.pkg-config
-              ];
-              buildInputs = [
-                pkgs.openssl
-              ];
-              postInstall = ''
-                installShellCompletion --cmd praddle \
-                  --bash gen/praddle.bash \
-                  --fish gen/praddle.fish \
-                  --zsh gen/_praddle
-                installManPage gen/*.1
-              '';
-            });
-            default = praddle;
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+
+        craneLib = crane.mkLib pkgs;
+
+        commonArgs = {
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (pkgs.lib.strings.hasSuffix "src/commit-msg" path) || (craneLib.filterCargoSources path type);
           };
-          formatter = pkgs.nixfmt-tree;
+          strictDeps = true;
+
+          buildInputs = with pkgs; [
+            openssl
+          ];
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+          ];
         };
-    };
+
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        praddle = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+          }
+        );
+      in
+      {
+        checks = {
+          inherit praddle;
+        };
+
+        packages.default = praddle;
+
+        devShells.default = craneLib.devShell {
+          inherit cargoArtifacts;
+          checks = self.checks.${system};
+          packages = with pkgs; [
+            gh
+          ];
+        };
+
+        formatter = pkgs.nixfmt-tree;
+      }
+    );
 }
