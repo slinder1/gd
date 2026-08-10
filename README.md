@@ -4,27 +4,23 @@ See `--help` for more.
 
 # Etymology
 
-<sub>(*Note:* Early versions of this project were named `gd`)</sub>
+<sub>(*Note:* This project was previously named `gd` and then `cgh`)</sub>
 
-The `c` refers to two things:
+The name doesn't meaning anything, but it sounds like "prattle", which I enjoy.
 
-* The tool is based around the Gerrit concept of a "change".
-* The stack of PRs can instead be thought of as a "chain". "Stack" is just
-  the de-facto consensus term.
-
-The `gh` is for "GitHub", specifically the `gh` tool that `cgh` wraps.
+A backronym might be "Pull Request, Add (Little Endian)".
 
 # Alternatives
 
 ## `spr`
 
-A very compelling alternative to `cgh` is https://github.com/ejoffe/spr which
+A very compelling alternative to `praddle` is https://github.com/ejoffe/spr which
 differs in a few ways:
 
 * `spr` will modify your local branches by default for logically
   non-destructive operations (i.e. when you try to `update` the remote)
 * `spr` won't use Gerrit `Change-Id:`, and is very particular about the format
-  of its ID; `cgh` allows any string and uses the `Change-Id:` trailer
+  of its ID; `praddle` allows any string and uses the `Change-Id:` trailer
 * `spr` does not seem to have a `dry-run` option, so modifications aren't
   foreseeable
 * `spr` doesn't produce an "interdiff" when force-pushing to give the reviewer
@@ -35,10 +31,10 @@ differs in a few ways:
 * `spr` warns you to only close/merge PRs through it, rather than just
   diagnosing when e.g. a PR would be created for a change which already has a
   merged PR
-* `spr` uses YAML for configuration, `cgh` uses TOML
-* `spr` is noisy by default, `cgh` is quiet by default
+* `spr` uses YAML for configuration, `praddle` uses TOML
+* `spr` is noisy by default, `praddle` is quiet by default
 * `spr` seems slightly less aggressive with parallelizing operations
-* `spr` is written in Go, `cgh` is written in Rust
+* `spr` is written in Go, `praddle` is written in Rust
 
 In the end most of these are fairly aesthetic and minor, but rather than try to
 hack on `spr` I opted to start over and make the exact tool I wanted. YMMV
@@ -58,7 +54,7 @@ seems to differ primarily in the UX and the structure of remote branches:
 ## `maiao`
 
 I haven't actually used https://github.com/adevinta/maiao but came across it
-since writing `cgh`. The biggest issue I see immediately is that it modifies
+since writing `praddle`. The biggest issue I see immediately is that it modifies
 local refs to do fixups and rebases.
 
 ## `graphite`

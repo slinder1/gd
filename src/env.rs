@@ -1,6 +1,11 @@
 // Copyright © 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: MIT
 
+// FIXME: Newer rustc has started complaining about some of the types
+// used through lazy_static, the plan is to remove most uses of
+// lazy_static anyway so just bandaiding it for now.
+#![allow(dead_code)]
+
 use crate::cli::Cli;
 use crate::util::Extract;
 use anyhow::{Context, Result, bail};
@@ -54,11 +59,11 @@ fn user_config_path(filename: &str) -> Option<PathBuf> {
 }
 
 fn read_config() -> Result<Config> {
-    let path = std::env::var_os("CGH_CONFIG_PATH")
+    let path = std::env::var_os("PRADDLE_CONFIG_PATH")
         .map(PathBuf::from)
-        .or_else(|| repo_config_path(".cgh.toml"))
-        .or_else(|| repo_config_path("cgh.toml"))
-        .or_else(|| user_config_path("cgh.toml"));
+        .or_else(|| repo_config_path(".praddle.toml"))
+        .or_else(|| repo_config_path("praddle.toml"))
+        .or_else(|| user_config_path("praddle.toml"));
     let path = match path {
         Some(p) => p,
         None => {

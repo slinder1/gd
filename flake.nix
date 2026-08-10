@@ -20,7 +20,7 @@
         in
         {
           packages = rec {
-            cgh = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+            praddle = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
               pname = toml.name;
               inherit (toml) version;
               cargoLock = {
@@ -36,14 +36,14 @@
                 pkgs.openssl
               ];
               postInstall = ''
-                installShellCompletion --cmd cgh \
-                  --bash gen/cgh.bash \
-                  --fish gen/cgh.fish \
-                  --zsh gen/_cgh
+                installShellCompletion --cmd praddle \
+                  --bash gen/praddle.bash \
+                  --fish gen/praddle.fish \
+                  --zsh gen/_praddle
                 installManPage gen/*.1
               '';
             });
-            default = cgh;
+            default = praddle;
           };
           formatter = pkgs.nixfmt-tree;
         };
