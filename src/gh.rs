@@ -118,15 +118,6 @@ impl Pr {
         self.state == state
     }
 
-    pub fn set_title_and_body(&self, title: &str, body: &str) -> Result<()> {
-        let mut body_arg = ArgInlineOrFile::new("body");
-        let mut cmd = gh();
-        let args = self.args_for("edit", [format!("--title={title}"), body_arg.arg(body)?])?;
-        cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
-        Ok(())
-    }
-
     pub fn mark_ready(&self, ready: bool) -> Result<()> {
         let mut cmd = gh();
         let opts = if ready {
@@ -224,32 +215,6 @@ impl Pr {
             }
         }
         bail!("gh pr create did not produce a URL")
-    }
-
-    pub fn merge(&self, subject: &str, body: &str, sha: &str) -> Result<()> {
-        let mut cmd = gh();
-        let mut body_arg = ArgInlineOrFile::new("body");
-        let body_arg_string = body_arg.arg(body)?;
-        let args = self.args_for(
-            "merge",
-            [
-                "--squash",
-                "--match-head-commit",
-                sha,
-                "--subject",
-                subject,
-                &body_arg_string,
-            ],
-        )?;
-        cmd.args(args);
-        let output = exec!(env::get(), dry_return = (), cmd);
-        // gh cli doesn't consider this a failure, but we want to so we don't mistakenly add an
-        // already-merged change to the metadata. We could instead infer that the change should be
-        // added to the metadata, but we can't necessarily assume it is the *next* merged change(?)
-        if String::from_utf8_lossy(output.stderr.as_ref()).contains("was already merged") {
-            bail!("pr {} was already merged", self.number);
-        }
-        Ok(())
     }
 
     pub fn get_url(&self) -> Result<String> {
