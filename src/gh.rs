@@ -354,6 +354,21 @@ impl Pr {
         Ok(())
     }
 
+    pub fn set_details(&mut self, title: &str, body: &str) -> Result<()> {
+        let mut body_arg = ArgInlineOrFile::new("body");
+        let mut cmd = gh();
+        let args = self.args_for("edit", [format!("--title={title}"), body_arg.arg(body)?])?;
+        cmd.args(args);
+        if env::get().dry_run() {
+            eprintln!("would-exec: {:?}", cmd);
+        } else {
+            exec!(env::get(), cmd);
+        }
+        self.title = title.to_owned();
+        self.body = body.to_owned();
+        Ok(())
+    }
+
     pub fn add_details_comment(&self, diff: &Diff) -> Result<()> {
         let (summary, changes) = match diff {
             Diff::InitialDiff(text) => ("Initial changes", text),
