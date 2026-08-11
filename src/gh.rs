@@ -21,6 +21,8 @@ pub struct Pr {
     pub body: String,
     pub state: PrState,
     pub base_ref_name: String,
+    #[serde(rename = "isDraft")]
+    pub draft: bool,
     pub stack: Option<PrStack>,
     pub stack_entry: Option<PrStackEntry>,
 }
@@ -328,7 +330,11 @@ impl Pr {
         self.state == state
     }
 
-    pub fn mark_ready(&self, ready: bool) -> Result<()> {
+    pub fn mark_ready(&mut self, ready: bool) -> Result<()> {
+        let draft = !ready;
+        if self.draft == draft {
+            return Ok(());
+        }
         let mut cmd = gh();
         let opts = if ready {
             vec![]
@@ -337,7 +343,12 @@ impl Pr {
         };
         let args = self.args_for("ready", opts)?;
         cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
+        if env::get().dry_run() {
+            eprintln!("would-exec: {:?}", cmd);
+        } else {
+            exec!(env::get(), cmd);
+        }
+        self.draft = draft;
         Ok(())
     }
 
@@ -355,6 +366,9 @@ impl Pr {
     }
 
     pub fn set_details(&mut self, title: &str, body: &str) -> Result<()> {
+        if self.title == title && self.body == body {
+            return Ok(());
+        }
         let mut body_arg = ArgInlineOrFile::new("body");
         let mut cmd = gh();
         let args = self.args_for("edit", [format!("--title={title}"), body_arg.arg(body)?])?;
@@ -441,6 +455,7 @@ impl Pr {
                     body: body.into(),
                     state: PrState::Open,
                     base_ref_name: base.into(),
+                    draft: true,
                     stack: None,
                     stack_entry: None,
                 });
@@ -459,7 +474,7 @@ query($searchQuery: String!, $limit: Int!, $endCursor: String) { \
 search(query: $searchQuery, type: ISSUE, first: $limit, after: $endCursor) { \
 nodes { \
     ... on PullRequest { \
-        number title body state baseRefName \
+        number title body state baseRefName isDraft \
         stack { number } \
         stackEntry { position } \
     } \
