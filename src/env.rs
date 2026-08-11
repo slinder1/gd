@@ -94,12 +94,12 @@ impl Env {
         self.cli.globals.dry_run
     }
 
-    pub fn verbose(&self) -> bool {
+    pub fn verbosity(&self) -> u8 {
         self.cli.globals.verbose
     }
 
     pub fn always_echo(&self) -> bool {
-        self.dry_run() || self.verbose()
+        self.dry_run() || self.verbosity() > 0
     }
 
     pub fn next_exec_id(&self) -> usize {
