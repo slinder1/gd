@@ -7,7 +7,7 @@ use crate::util::exec;
 use anyhow::{Context, Result, bail};
 use git2::message_trailers_strs;
 use rayon::prelude::*;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process::Command;
@@ -150,6 +150,72 @@ struct GraphQlPageInfo {
 }
 
 const GQL_LIMIT: u8 = 100;
+
+#[derive(Debug, Deserialize)]
+struct RestStack {
+    pull_requests: Vec<RestStackPr>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestStackPr {
+    number: u64,
+    merged_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct StackRequest<'a> {
+    pull_requests: &'a [u64],
+}
+
+fn rest_stack(endpoint: String) -> Result<RestStack> {
+    let args = vec![
+        "api".to_owned(),
+        endpoint,
+        "--header".to_owned(),
+        "Accept: application/vnd.github+json".to_owned(),
+        "--header".to_owned(),
+        "X-GitHub-Api-Version: 2026-03-10".to_owned(),
+    ];
+    let mut cmd = gh();
+    cmd.args(args);
+    let output = exec!(env::get(), cmd);
+    Ok(serde_json::from_slice(output.stdout.as_ref())?)
+}
+
+fn rest_api_empty(method: &str, endpoint: String, body: Option<&[u64]>) -> Result<()> {
+    let input = body
+        .map(|pull_requests| -> anyhow::Result<_> {
+            let mut input = NamedTempFile::new()?;
+            serde_json::to_writer(&mut input, &StackRequest { pull_requests })?;
+            let path = input
+                .path()
+                .to_str()
+                .context("input file path is not utf-8")?;
+            Ok((format!("--input={path}"), input))
+        })
+        .transpose()?;
+    let mut args = vec![
+        "api".to_owned(),
+        endpoint,
+        "--method".to_owned(),
+        method.to_owned(),
+        "--header".to_owned(),
+        "Accept: application/vnd.github+json".to_owned(),
+        "--header".to_owned(),
+        "X-GitHub-Api-Version: 2026-03-10".to_owned(),
+    ];
+    if let Some((input_arg, _)) = input.as_ref() {
+        args.push(input_arg.clone());
+    }
+    let mut cmd = gh();
+    cmd.args(args);
+    if env::get().dry_run() {
+        eprintln!("would-exec: {:?}", cmd);
+        return Ok(());
+    }
+    exec!(env::get(), cmd);
+    Ok(())
+}
 
 fn graphql_search<T, K, F>(gql_query: &str, search_query: &str, key: F) -> Result<Vec<T>>
 where
@@ -369,6 +435,75 @@ fn prs() -> Result<Vec<Pr>> {
         }
     }
     Ok(prs)
+}
+
+pub fn reconcile_stack(prs: &[&Pr]) -> Result<()> {
+    let (owner, name) = repo_name()?;
+    let desired: Vec<u64> = prs.iter().rev().map(|pr| pr.number).collect();
+    let stack_numbers: HashSet<u64> = prs
+        .iter()
+        .filter_map(|pr| pr.stack.as_ref().map(|stack| stack.number))
+        .collect();
+    if stack_numbers.len() > 1 {
+        bail!("local prs belong to multiple GitHub stacks: {stack_numbers:?}");
+    }
+
+    let Some(stack_number) = stack_numbers.iter().next().copied() else {
+        rest_api_empty(
+            "POST",
+            format!("repos/{owner}/{name}/stacks"),
+            Some(&desired),
+        )?;
+        return Ok(());
+    };
+    let endpoint = |suffix: &str| format!("repos/{owner}/{name}/stacks/{stack_number}{suffix}");
+
+    let stack = rest_stack(endpoint(""))?;
+    let unmerged: Vec<u64> = stack
+        .pull_requests
+        .iter()
+        .filter(|pr| pr.merged_at.is_none())
+        .map(|pr| pr.number)
+        .collect();
+    let local_stack: Vec<&Pr> = prs
+        .iter()
+        .filter(|pr| {
+            pr.stack
+                .as_ref()
+                .is_some_and(|stack| stack.number == stack_number)
+        })
+        .copied()
+        .collect();
+    if local_stack.len() != unmerged.len() {
+        bail!("GitHub stack {stack_number} contains unmerged prs outside the local stack");
+    }
+
+    let mut by_position = local_stack;
+    by_position.sort_unstable_by_key(|pr| {
+        pr.stack_entry
+            .as_ref()
+            .map(|entry| entry.position)
+            .unwrap_or(u64::MAX)
+    });
+    let existing: Vec<u64> = by_position.iter().map(|pr| pr.number).collect();
+    if existing != unmerged {
+        bail!("GraphQL and REST disagree about the order of GitHub stack {stack_number}");
+    }
+
+    if desired.starts_with(&existing) {
+        let additions = &desired[existing.len()..];
+        if !additions.is_empty() {
+            rest_api_empty("POST", endpoint("/add"), Some(additions))?;
+        }
+    } else {
+        rest_api_empty("DELETE", endpoint("/remove"), Some(&existing))?;
+        rest_api_empty(
+            "POST",
+            format!("repos/{owner}/{name}/stacks"),
+            Some(&desired),
+        )?;
+    }
+    Ok(())
 }
 
 pub fn prs_by_change_id() -> Result<HashMap<String, Pr>> {
