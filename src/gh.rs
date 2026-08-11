@@ -6,8 +6,8 @@ use crate::env;
 use crate::util::exec;
 use anyhow::{Context, Result, bail};
 use git2::message_trailers_strs;
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, de::DeserializeOwned};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -20,6 +20,18 @@ pub struct Pr {
     pub body: String,
     pub state: PrState,
     pub base_ref_name: String,
+    pub stack: Option<PrStack>,
+    pub stack_entry: Option<PrStackEntry>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PrStack {
+    pub number: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PrStackEntry {
+    pub position: u64,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -94,6 +106,115 @@ fn build_repo_url() -> Result<String> {
 
 fn repo_arg() -> Result<String> {
     Ok(format!("--repo={}", build_repo_url()?))
+}
+
+fn repo_name() -> Result<(String, String)> {
+    let url = build_repo_url()?;
+    let path = url
+        .strip_prefix("https://github.com/")
+        .context("could not parse GitHub repository URL")?
+        .trim_end_matches('/');
+    let (owner, name) = path
+        .split_once('/')
+        .context("GitHub repository URL has no owner or repository name")?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        bail!("GitHub repository URL has an invalid owner or repository name: {path}");
+    }
+    Ok((owner.to_owned(), name.to_owned()))
+}
+
+#[derive(Deserialize)]
+struct GraphQlResponse<T> {
+    data: Option<T>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlSearchData<T> {
+    search: GraphQlSearch<T>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlSearch<T> {
+    #[serde(rename = "issueCount")]
+    _issue_count: u64,
+    nodes: Vec<T>,
+    #[serde(rename = "pageInfo")]
+    page_info: GraphQlPageInfo,
+}
+
+#[derive(Deserialize)]
+struct GraphQlPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+fn graphql_search<T, K, F>(query: &str, search_query: &str, limit: usize, key: F) -> Result<Vec<T>>
+where
+    T: DeserializeOwned,
+    K: Eq + std::hash::Hash,
+    F: Fn(&T) -> K,
+{
+    let page_limit = limit.min(100);
+    let mut page_limit = page_limit;
+    let mut end_cursor = None;
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+
+    loop {
+        if page_limit == 0 {
+            break;
+        }
+        let search_query_arg = format!("searchQuery={search_query}");
+        let limit_arg = format!("limit={page_limit}");
+        let query_arg = format!("query={query}");
+        let mut args = vec![
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-F".to_owned(),
+            search_query_arg,
+            "-F".to_owned(),
+            limit_arg,
+            "-f".to_owned(),
+            query_arg,
+        ];
+        if let Some(cursor) = end_cursor.as_ref() {
+            args.extend(["-F".to_owned(), format!("endCursor={cursor}")]);
+        }
+
+        let mut cmd = gh();
+        cmd.args(args);
+        let output = exec!(env::get(), cmd);
+        let response: GraphQlResponse<GraphQlSearchData<T>> =
+            serde_json::from_slice(output.stdout.as_ref())?;
+        let data = response
+            .data
+            .context("GitHub GraphQL response did not contain data")?;
+        let search = data.search;
+
+        for node in search.nodes {
+            if seen.insert(key(&node)) {
+                nodes.push(node);
+                if nodes.len() == limit {
+                    return Ok(nodes);
+                }
+            }
+        }
+
+        if !search.page_info.has_next_page {
+            break;
+        }
+        end_cursor = Some(
+            search
+                .page_info
+                .end_cursor
+                .context("GitHub GraphQL response had no cursor for the next page")?,
+        );
+        page_limit = (limit - nodes.len()).min(100);
+    }
+
+    Ok(nodes)
 }
 
 impl Pr {
@@ -211,6 +332,8 @@ impl Pr {
                     body: body.into(),
                     state: PrState::Open,
                     base_ref_name: base.into(),
+                    stack: None,
+                    stack_entry: None,
                 });
             }
         }
@@ -222,25 +345,38 @@ impl Pr {
     }
 }
 
-fn prs<P: FnMut(&Pr) -> bool>(predicate: P) -> Result<Vec<Pr>> {
-    let mut cmd = gh();
-    let repo_arg = repo_arg()?;
-    cmd.args([
-        "pr",
-        "list",
-        repo_arg.as_str(),
-        "--author=@me",
-        "--state=all",
-        "--json=number,title,body,state,baseRefName",
-    ]);
-    let output = exec!(env::get(), cmd);
-    let all_prs: Vec<Pr> = serde_json::from_slice(output.stdout.as_ref())?;
-    Ok(all_prs.into_iter().filter(predicate).collect())
+fn prs() -> Result<Vec<Pr>> {
+    #[derive(Deserialize)]
+    struct GraphQlPr {
+        #[serde(flatten)]
+        pr: Pr,
+    }
+
+    let (owner, name) = repo_name()?;
+    let query = format!(
+        "query($searchQuery: String!, $limit: Int!, $endCursor: String) {{ search(query: $searchQuery, type: ISSUE, first: $limit, after: $endCursor) {{ issueCount nodes {{ ... on PullRequest {{ number title body state baseRefName stack {{ number }} stackEntry {{ position }} }} }} pageInfo {{ hasNextPage endCursor }} }} }}"
+    );
+    let search_queries = [
+        format!("repo:{owner}/{name} is:pr author:@me state:open"),
+        format!("repo:{owner}/{name} is:pr author:@me is:merged"),
+    ];
+    let mut seen = HashSet::new();
+    let mut prs = Vec::new();
+    for search_query in search_queries {
+        for pr in graphql_search(&query, &search_query, usize::MAX, |pr: &GraphQlPr| {
+            pr.pr.number
+        })? {
+            if seen.insert(pr.pr.number) {
+                prs.push(pr.pr);
+            }
+        }
+    }
+    Ok(prs)
 }
 
-pub fn prs_by_change_id<P: FnMut(&Pr) -> bool>(predicate: P) -> Result<HashMap<String, Pr>> {
+pub fn prs_by_change_id() -> Result<HashMap<String, Pr>> {
     let mut by_id = HashMap::new();
-    for pr in prs(predicate)? {
+    for pr in prs()? {
         let trailers =
             message_trailers_strs(pr.message().as_ref()).context("message_trailers_strs failed")?;
         let mut change_ids = trailers
