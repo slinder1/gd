@@ -82,15 +82,27 @@ impl LocalChange {
         format!("{oid}:{remote_branch_ref}")
     }
     pub fn push_all<'a, I: Iterator<Item = &'a Self>>(iterator: I) -> Result<()> {
-        let refspecs: Vec<String> = iterator.map(|lc| lc.push_refspec()).collect();
+        let repo = env::get().repo()?;
+        let remote = env::get().remote();
+        let refspecs: Vec<String> = iterator
+            .filter_map(|lc| {
+                let remote_ref = format!("refs/remotes/{remote}/{}", lc.remote_branch());
+                let already_current = repo
+                    .find_reference(&remote_ref)
+                    .ok()
+                    .and_then(|reference| reference.target())
+                    == Some(lc.oid);
+                (!already_current).then(|| lc.push_refspec())
+            })
+            .collect();
         if refspecs.is_empty() {
-            bail!("no refs to push");
+            return Ok(());
         }
         let mut cmd = Command::new("git");
         let mut args = vec![
             "push".to_string(),
             env::get().remote().into(),
-            "--force".into(),
+            "--force-with-lease".into(),
             "--atomic".into(),
         ];
         args.extend(refspecs);
