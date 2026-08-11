@@ -1,5 +1,14 @@
 use clap::{ArgAction, Args, Parser, Subcommand};
 
+fn parse_verbosity(value: &str) -> Result<u8, String> {
+    match value {
+        "0" => Ok(0),
+        "1" => Ok(1),
+        "2" | "v" => Ok(2),
+        _ => Err("verbosity must be 0, 1, or 2/v".into()),
+    }
+}
+
 /// GitHub stacked-PR builder for those who miss Gerrit
 ///
 /// Main features:
@@ -77,9 +86,17 @@ pub struct Globals {
     /// which have the potential to mutate remote state are skipped and printed.
     #[arg(short = '#', long, global = true)]
     pub dry_run: bool,
-    /// Output all commands executed, and their stdout/stderr.
-    #[arg(short, long, global = true)]
-    pub verbose: bool,
+    /// Output commands executed. Repeat for command output as well.
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_parser = parse_verbosity,
+        num_args = 0..=1,
+        default_missing_value = "1",
+        default_value = "0"
+    )]
+    pub verbose: u8,
 }
 
 #[derive(Subcommand)]
