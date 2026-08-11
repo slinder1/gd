@@ -69,7 +69,7 @@ pub struct LocalChange {
 
 impl LocalChange {
     pub fn remote_branch(&self) -> String {
-        let branch_prefix = env::user_branch_prefix();
+        let branch_prefix = env::get().user_branch_prefix();
         let change_id = &self.id;
         format!("{branch_prefix}{change_id}")
     }
@@ -89,13 +89,13 @@ impl LocalChange {
         let mut cmd = Command::new("git");
         let mut args = vec![
             "push".to_string(),
-            env::remote().into(),
+            env::get().remote().into(),
             "--force".into(),
             "--atomic".into(),
         ];
         args.extend(refspecs);
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
     pub fn fetch_all<'a, I: Iterator<Item = &'a Self>>(iterator: I) -> Result<()> {
@@ -106,15 +106,15 @@ impl LocalChange {
             return Ok(());
         }
         let mut cmd = Command::new("git");
-        let mut args = vec!["fetch".to_string(), env::remote().into()];
+        let mut args = vec!["fetch".to_string(), env::get().remote().into()];
         args.extend(refspecs);
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
     pub fn diff(&self) -> Result<String> {
         let change = self.id.as_str();
-        let repo = env::repo();
+        let repo = env::get().repo()?;
         let commit = self.commit()?;
         let parent = commit
             .parent(0)
@@ -131,8 +131,8 @@ impl LocalChange {
             .with_context(|| format!("failed to generate interdiff for change {change}"))?;
         Ok(out)
     }
-    pub fn commit<'repo>(&self) -> Result<Commit<'repo>> {
-        Ok(env::repo().find_commit(self.oid)?)
+    pub fn commit(&self) -> Result<Commit<'_>> {
+        Ok(env::get().repo()?.find_commit(self.oid)?)
     }
 }
 
@@ -179,7 +179,7 @@ impl Change {
         for pr in merged_prs.iter().rev() {
             body.push_str(&format!("- #{}\n", pr.number));
         }
-        body.push_str(&format!("- `{}`\n\n<sub>(Note: Closed and merged PRs may not be reflected here and PR numbering is not stable.)</sub>\n", env::base_branch()));
+        body.push_str(&format!("- `{}`\n\n<sub>(Note: Closed and merged PRs may not be reflected here and PR numbering is not stable.)</sub>\n", env::get().base_branch()));
         let count = changes.len() + merged_prs.len();
         let position = count - index;
         let prefix = if short_name.is_empty() {
@@ -193,8 +193,12 @@ impl Change {
     /// Adapted from https://joshcannon.me/2025/04/05/pr-interdiff.html
     pub fn interdiff(&self) -> Result<String> {
         let change = self.local_change.id.as_str();
-        let repo = env::repo();
-        let remote_branch = format!("{}/{}", env::remote(), self.local_change.remote_branch());
+        let repo = env::get().repo()?;
+        let remote_branch = format!(
+            "{}/{}",
+            env::get().remote(),
+            self.local_change.remote_branch()
+        );
         let old_commit = repo
             .revparse_single(remote_branch.as_ref())
             .with_context(|| format!("could not parse revspec for remote branch: {remote_branch}"))?
@@ -250,11 +254,12 @@ fn tree<'repo>(commit: &Commit<'repo>) -> Result<Tree<'repo>> {
 }
 
 pub fn get_local_changes() -> Result<Vec<LocalChange>> {
-    let repo = env::repo();
+    let repo = env::get().repo()?;
     let mut local_changes = vec![];
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
-    revwalk.hide_ref(env::base_branch_ref())?;
+    let base_branch_ref = env::get().base_branch_ref();
+    revwalk.hide_ref(&base_branch_ref)?;
     for oid in revwalk {
         let oid = oid?;
         let commit = repo.find_commit(oid)?;

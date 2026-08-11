@@ -8,6 +8,7 @@ use crate::gh::{self, Pr, PrState};
 use crate::metadata::StackMetadata;
 use crate::util::Extract;
 use anyhow::{Context, Result, bail};
+use git2::Repository;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs::File;
@@ -15,8 +16,12 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-pub fn praddle() -> Result<()> {
-    let cli = env::cli();
+pub fn praddle(cli: cli::Cli) -> Result<()> {
+    if let cli::Command::InstallHook(ref args) = cli.command {
+        return install_hook(args, cli.globals.dry_run);
+    }
+    env::init(cli)?;
+    let cli = env::get().cli();
     if cli.globals.serial {
         rayon::ThreadPoolBuilder::new()
             .num_threads(1)
@@ -24,22 +29,23 @@ pub fn praddle() -> Result<()> {
             .context("could not install serial thread pool")
             .extract();
     }
-    env::validate().context("invalid configuration")?;
     match cli.command {
-        cli::Command::Push(ref cfg) => push(cfg),
-        cli::Command::Name(ref cfg) => name(cfg),
-        cli::Command::Merge(ref cfg) => merge(cfg),
-        cli::Command::Url(ref cfg) => url(cfg),
-        cli::Command::InstallHook(ref cfg) => install_hook(cfg),
+        cli::Command::Push(ref args) => push(args),
+        cli::Command::Name(ref args) => name(args),
+        cli::Command::Merge(ref args) => merge(args),
+        cli::Command::Url(ref args) => url(args),
+        cli::Command::InstallHook(_) => unreachable!(),
     }
 }
 
-fn push(cfg: &cli::Push) -> Result<()> {
+fn push(args: &cli::Push) -> Result<()> {
+    let env = env::get();
     let stack_meta =
         StackMetadata::from_repo().context("could not parse branch description metadata")?;
     let mut reviewers = vec![];
-    for group_key in cfg.reviewer_groups.iter() {
-        let group = env::reviewer_groups()
+    for group_key in args.reviewer_groups.iter() {
+        let group = env
+            .reviewer_groups()
             .context("used a review group, but none were found in the config file")?
             .get(group_key)
             .with_context(|| format!("reviewer group {group_key:?} not found in config file"))?;
@@ -80,7 +86,7 @@ fn push(cfg: &cli::Push) -> Result<()> {
         });
     }
     let has_cycles = detect_cycles(&any_changes);
-    if has_cycles || cfg.draft {
+    if has_cycles || args.draft {
         any_changes
             .par_iter()
             .filter_map(|ac| {
@@ -95,11 +101,11 @@ fn push(cfg: &cli::Push) -> Result<()> {
                     .with_context(|| format!("could not mark pr as draft: {:?}", c.pr))?;
                 // FIXME: This is pretty coarse-grained, could find the minimal set.
                 if has_cycles {
-                    c.pr.set_base(env::base_branch()).with_context(|| {
+                    c.pr.set_base(env.base_branch()).with_context(|| {
                         format!(
                             "could not retarget pr {} to base branch: {:?}",
                             c.pr.number,
-                            env::base_branch(),
+                            env.base_branch(),
                         )
                     })?;
                 }
@@ -146,7 +152,7 @@ fn push(cfg: &cli::Push) -> Result<()> {
                 .iter()
                 .next()
                 .map(|p| p.local_change.remote_branch())
-                .unwrap_or_else(|| env::base_branch().to_owned());
+                .unwrap_or_else(|| env.base_branch().to_owned());
             c.pr.set_base(base.as_ref()).with_context(|| {
                 format!(
                     "could not retarget pr {} to branch: {:?}",
@@ -169,7 +175,7 @@ fn push(cfg: &cli::Push) -> Result<()> {
         .map(|c| c.pr.add_reviewers(reviewers.as_ref()))
         .collect::<Result<Vec<_>>>()
         .context("could not add pr reviewers")?;
-    if !cfg.draft {
+    if !args.draft {
         changes
             .par_iter()
             .map(|c| c.pr.mark_ready(true))
@@ -194,9 +200,9 @@ fn detect_cycles(any_changes: &[AnyChange]) -> bool {
     false
 }
 
-fn name(cfg: &cli::Name) -> Result<()> {
+fn name(args: &cli::Name) -> Result<()> {
     let mut stack_meta = StackMetadata::from_repo()?;
-    match cfg.new_name {
+    match args.new_name {
         None => println!("{}", stack_meta.short_name),
         Some(ref new_name) => {
             stack_meta.short_name = new_name.to_string();
@@ -206,7 +212,7 @@ fn name(cfg: &cli::Name) -> Result<()> {
     Ok(())
 }
 
-fn merge(_cfg: &cli::Merge) -> Result<()> {
+fn merge(_args: &cli::Merge) -> Result<()> {
     let mut stack_meta =
         StackMetadata::from_repo().context("could not parse branch description metadata")?;
     let local_change = change::get_local_changes()
@@ -230,14 +236,14 @@ fn merge(_cfg: &cli::Merge) -> Result<()> {
     Ok(())
 }
 
-fn url(_cfg: &cli::Url) -> Result<()> {
+fn url(_args: &cli::Url) -> Result<()> {
     let local_changes =
         change::get_local_changes().context("could not enumerate current local branch")?;
     let mut prs_by_change_id = gh::prs_by_change_id(|pr| !pr.in_state(PrState::Closed))
         .context("could not enumerate remote prs")?;
     for local_change in local_changes {
         if let Some(pr) = prs_by_change_id.remove(&local_change.id) {
-            println!("{}", pr.get_url());
+            println!("{}", pr.get_url()?);
             return Ok(());
         }
     }
@@ -247,15 +253,16 @@ fn url(_cfg: &cli::Url) -> Result<()> {
 static COMMIT_MSG_HOOK_SRC: &str = include_str!("commit-msg");
 static EXECUTABLE_MODE_BITS: u32 = 0o111;
 
-fn install_hook(cfg: &cli::InstallHook) -> Result<()> {
-    let mut hook_path = PathBuf::from(env::repo().commondir());
+fn install_hook(args: &cli::InstallHook, dry_run: bool) -> Result<()> {
+    let repo = Repository::open(".").context("not in a git repo")?;
+    let mut hook_path = PathBuf::from(repo.commondir());
     hook_path.extend(["hooks", "commit-msg"]);
-    if env::dry_run() {
-        let verb = if cfg.force { "overwrite" } else { "write" };
+    if dry_run {
+        let verb = if args.force { "overwrite" } else { "write" };
         eprintln!("would {verb} {hook_path:?}");
         return Ok(());
     }
-    let mut hook_file: File = if cfg.force {
+    let mut hook_file: File = if args.force {
         File::create(&hook_path)
             .with_context(|| format!("could not create hook file: {hook_path:?}"))
     } else {

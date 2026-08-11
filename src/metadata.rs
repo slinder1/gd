@@ -14,7 +14,7 @@ const MERGED_CHANGE_IDS_KEY: &str = "mergedChangeIds";
 
 impl StackMetadata {
     pub fn from_repo() -> Result<Self> {
-        let repo = env::repo();
+        let repo = env::get().repo()?;
         let branch = repo.head_branch().context("HEAD must be a branch")?;
         let branch_config = repo.branch_config(&branch)?;
         let short_name = branch_config.get(SHORT_NAME_KEY)?;
@@ -39,11 +39,11 @@ impl StackMetadata {
         Ok(res)
     }
     pub fn to_repo(&self) -> Result<()> {
-        if env::dry_run() {
+        if env::get().dry_run() {
             eprintln!("would-set: {:?}", self);
             return Ok(());
         }
-        let repo = env::repo();
+        let repo = env::get().repo()?;
         let branch = repo.head_branch().context("HEAD must be a branch")?;
         let mut branch_config = repo.branch_config(&branch)?;
         branch_config.set(SHORT_NAME_KEY, &self.short_name)?;

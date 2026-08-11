@@ -3,10 +3,9 @@
 
 use crate::change::{Diff, LocalChange};
 use crate::env;
-use crate::util::{Extract, exec};
+use crate::util::exec;
 use anyhow::{Context, Result, bail};
 use git2::message_trailers_strs;
-use lazy_static::lazy_static;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Write;
@@ -71,22 +70,16 @@ impl ArgInlineOrFile {
     }
 }
 
-lazy_static! {
-    static ref REPO_URL: String = build_repo_url().extract();
-    static ref REPO_ARG: String = format!("--repo={}", REPO_URL.as_str());
-}
-// FIXME: Newer rustc has started complaining about some of the types
-// used through lazy_static, the plan is to remove most uses of
-// lazy_static anyway so just bandaiding it for now.
-#[allow(dead_code)]
 // FIXME: this pseudo-parsing seems wrong, but just getting it working for me first
 fn build_repo_url() -> Result<String> {
-    let remote = env::repo()
-        .find_remote(env::remote())
-        .with_context(|| format!("remote not found: {}", env::remote()))?;
+    let env = env::get();
+    let remote = env
+        .repo()?
+        .find_remote(env.remote())
+        .with_context(|| format!("remote not found: {}", env.remote()))?;
     let url = remote
         .url()
-        .with_context(|| format!("remote has no url: {}", env::remote()))?;
+        .with_context(|| format!("remote has no url: {}", env.remote()))?;
     Ok(if url.starts_with("https://") {
         url.into()
     } else if let Some(git_path) = url.strip_prefix("git@github.com:") {
@@ -99,18 +92,22 @@ fn build_repo_url() -> Result<String> {
     })
 }
 
+fn repo_arg() -> Result<String> {
+    Ok(format!("--repo={}", build_repo_url()?))
+}
+
 impl Pr {
-    fn args_for<I, S>(&self, subcommand: &str, opts: I) -> Vec<String>
+    fn args_for<I, S>(&self, subcommand: &str, opts: I) -> Result<Vec<String>>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         let mut args = vec!["pr".into()];
-        args.extend([subcommand.into(), self.number.to_string(), REPO_ARG.clone()]);
+        args.extend([subcommand.into(), self.number.to_string(), repo_arg()?]);
         for opt in opts {
             args.push(opt.into());
         }
-        args
+        Ok(args)
     }
 
     pub fn message(&self) -> String {
@@ -124,9 +121,9 @@ impl Pr {
     pub fn set_title_and_body(&self, title: &str, body: &str) -> Result<()> {
         let mut body_arg = ArgInlineOrFile::new("body");
         let mut cmd = gh();
-        let args = self.args_for("edit", [format!("--title={title}"), body_arg.arg(body)?]);
+        let args = self.args_for("edit", [format!("--title={title}"), body_arg.arg(body)?])?;
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
 
@@ -137,17 +134,17 @@ impl Pr {
         } else {
             vec!["--undo".to_string()]
         };
-        let args = self.args_for("ready", opts);
+        let args = self.args_for("ready", opts)?;
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
 
     pub fn set_base(&self, base: &str) -> Result<()> {
         let mut cmd = gh();
-        let args = self.args_for("edit", [format!("--base={base}")]);
+        let args = self.args_for("edit", [format!("--base={base}")])?;
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
 
@@ -164,9 +161,9 @@ impl Pr {
         );
         let mut body_arg = ArgInlineOrFile::new("body");
         let mut cmd = gh();
-        let args = self.args_for("comment", [body_arg.arg(comment)?]);
+        let args = self.args_for("comment", [body_arg.arg(comment)?])?;
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
 
@@ -175,14 +172,16 @@ impl Pr {
             return Ok(());
         }
         let mut cmd = gh();
-        let args = self.args_for("edit", [format!("--add-reviewer={}", reviewers.join(","))]);
+        let args = self.args_for("edit", [format!("--add-reviewer={}", reviewers.join(","))])?;
         cmd.args(args);
-        exec!(dry_return = (), cmd);
+        exec!(env::get(), dry_return = (), cmd);
         Ok(())
     }
 
     pub fn create(local_change: &LocalChange) -> Result<Pr> {
-        let commit = env::repo()
+        let env = env::get();
+        let commit = env
+            .repo()?
             .find_commit(local_change.oid)
             .context("cannot find commit")?;
         let remote_branch_ref = local_change.remote_branch_ref();
@@ -194,13 +193,13 @@ impl Pr {
             .body()
             .context("failed to get commit body")?
             .context("commit has no body")?;
-        let base = env::base_branch();
+        let base = env.base_branch();
         let mut body_arg = ArgInlineOrFile::new("body");
         let mut cmd = gh();
         let args = vec![
             "pr".into(),
             "create".into(),
-            REPO_ARG.clone(),
+            repo_arg()?,
             "--draft".into(),
             format!("--base={base}"),
             format!("--title={title}"),
@@ -208,7 +207,7 @@ impl Pr {
             format!("--head={remote_branch_ref}"),
         ];
         cmd.args(args);
-        let output = exec!(dry_return = Pr::default(), cmd);
+        let output = exec!(env::get(), dry_return = Pr::default(), cmd);
         for line in String::from_utf8_lossy(output.stdout.as_ref()).lines() {
             if line.starts_with("https://github.com") {
                 let mut path_components = line.rsplitn(2, '/');
@@ -241,9 +240,9 @@ impl Pr {
                 subject,
                 &body_arg_string,
             ],
-        );
+        )?;
         cmd.args(args);
-        let output = exec!(dry_return = (), cmd);
+        let output = exec!(env::get(), dry_return = (), cmd);
         // gh cli doesn't consider this a failure, but we want to so we don't mistakenly add an
         // already-merged change to the metadata. We could instead infer that the change should be
         // added to the metadata, but we can't necessarily assume it is the *next* merged change(?)
@@ -253,22 +252,23 @@ impl Pr {
         Ok(())
     }
 
-    pub fn get_url(&self) -> String {
-        format!("{}/pull/{}", REPO_URL.as_str(), self.number)
+    pub fn get_url(&self) -> Result<String> {
+        Ok(format!("{}/pull/{}", build_repo_url()?, self.number))
     }
 }
 
 fn prs<P: FnMut(&Pr) -> bool>(predicate: P) -> Result<Vec<Pr>> {
     let mut cmd = gh();
+    let repo_arg = repo_arg()?;
     cmd.args([
         "pr",
         "list",
-        REPO_ARG.as_ref(),
+        repo_arg.as_str(),
         "--author=@me",
         "--state=all",
         "--json=number,title,body,state,baseRefName",
     ]);
-    let output = exec!(cmd);
+    let output = exec!(env::get(), cmd);
     let all_prs: Vec<Pr> = serde_json::from_slice(output.stdout.as_ref())?;
     Ok(all_prs.into_iter().filter(predicate).collect())
 }
