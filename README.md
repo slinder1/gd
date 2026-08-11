@@ -59,8 +59,9 @@ local refs to do fixups and rebases.
 
 ## `graphite`
 
-I have had only negative experiences with https://graphite.dev/ and in
-particular my issues are:
+I have had only negative experiences with https://graphite.dev/
+
+In particular my issues are:
 
 * Modifies local refs, and inserts itself into your workflow before you even
   consider creating PRs
