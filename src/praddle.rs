@@ -203,7 +203,7 @@ fn push(args: &cli::Push) -> Result<()> {
         .context("could not add pr reviewers")?;
     if !args.draft {
         changes
-            .par_iter()
+            .par_iter_mut()
             .map(|c| c.pr.mark_ready(true))
             .collect::<Result<Vec<_>>>()
             .context("could not mark prs as ready")?;
