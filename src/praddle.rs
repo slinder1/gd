@@ -175,6 +175,22 @@ fn push(args: &cli::Push) -> Result<()> {
     gh::reconcile_stack(&changes.iter().map(|change| &change.pr).collect::<Vec<_>>())
         .context("could not reconcile pr stack")?;
     changes
+        .par_iter_mut()
+        .map(|c| {
+            let commit = c.local_change.commit()?;
+            let title = commit
+                .summary()
+                .context("failed to get commit summary")?
+                .context("commit has no summary")?;
+            let body = commit
+                .body()
+                .context("failed to get commit body")?
+                .context("commit has no body")?;
+            c.pr.set_details(title, body)
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("could not update pr titles and bodies")?;
+    changes
         .par_iter()
         .zip(diffs)
         .map(|(c, diff)| c.pr.add_details_comment(&diff))
