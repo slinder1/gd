@@ -135,8 +135,6 @@ struct GraphQlSearchData<T> {
 
 #[derive(Deserialize)]
 struct GraphQlSearch<T> {
-    #[serde(rename = "issueCount")]
-    _issue_count: u64,
     nodes: Vec<T>,
     #[serde(rename = "pageInfo")]
     page_info: GraphQlPageInfo,
@@ -150,7 +148,7 @@ struct GraphQlPageInfo {
     end_cursor: Option<String>,
 }
 
-fn graphql_search<T, K, F>(query: &str, search_query: &str, limit: usize, key: F) -> Result<Vec<T>>
+fn graphql_search<T, K, F>(gql_query: &str, search_query: &str, limit: usize, key: F) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
     K: Eq + std::hash::Hash,
@@ -168,7 +166,7 @@ where
         }
         let search_query_arg = format!("searchQuery={search_query}");
         let limit_arg = format!("limit={page_limit}");
-        let query_arg = format!("query={query}");
+        let query_arg = format!("query={gql_query}");
         let mut args = vec![
             "api".to_owned(),
             "graphql".to_owned(),
@@ -345,6 +343,20 @@ impl Pr {
     }
 }
 
+const PR_GQL_QUERY: &'static str = "\
+query($searchQuery: String!, $limit: Int!, $endCursor: String) { \
+search(query: $searchQuery, type: ISSUE, first: $limit, after: $endCursor) { \
+nodes { \
+    ... on PullRequest { \
+        number title body state baseRefName \
+        stack { number } \
+        stackEntry { position } \
+    } \
+} \
+pageInfo { hasNextPage endCursor } \
+}}\
+";
+
 fn prs() -> Result<Vec<Pr>> {
     #[derive(Deserialize)]
     struct GraphQlPr {
@@ -353,9 +365,6 @@ fn prs() -> Result<Vec<Pr>> {
     }
 
     let (owner, name) = repo_name()?;
-    let query = format!(
-        "query($searchQuery: String!, $limit: Int!, $endCursor: String) {{ search(query: $searchQuery, type: ISSUE, first: $limit, after: $endCursor) {{ issueCount nodes {{ ... on PullRequest {{ number title body state baseRefName stack {{ number }} stackEntry {{ position }} }} }} pageInfo {{ hasNextPage endCursor }} }} }}"
-    );
     let search_queries = [
         format!("repo:{owner}/{name} is:pr author:@me state:open"),
         format!("repo:{owner}/{name} is:pr author:@me is:merged"),
@@ -363,7 +372,7 @@ fn prs() -> Result<Vec<Pr>> {
     let mut seen = HashSet::new();
     let mut prs = Vec::new();
     for search_query in search_queries {
-        for pr in graphql_search(&query, &search_query, usize::MAX, |pr: &GraphQlPr| {
+        for pr in graphql_search(PR_GQL_QUERY, &search_query, usize::MAX, |pr: &GraphQlPr| {
             pr.pr.number
         })? {
             if seen.insert(pr.pr.number) {
