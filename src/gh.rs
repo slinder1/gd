@@ -217,6 +217,37 @@ fn rest_api_empty(method: &str, endpoint: String, body: Option<&[u64]>) -> Resul
     Ok(())
 }
 
+fn unstack(endpoint: String) -> Result<()> {
+    let mut cmd = gh();
+    cmd.args([
+        "api",
+        endpoint.as_str(),
+        "--method",
+        "POST",
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--header",
+        "X-GitHub-Api-Version: 2026-03-10",
+        "--include",
+    ]);
+    if env::get().dry_run() {
+        eprintln!("would-exec: {:?}", cmd);
+        return Ok(());
+    }
+    let output = exec!(env::get(), cmd);
+    let status = String::from_utf8_lossy(output.stdout.as_ref())
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .context("gh api unstack response did not contain an HTTP status")?;
+    match status {
+        204 => Ok(()),
+        200 => bail!("unstacking {endpoint} left pull requests in the stack"),
+        _ => bail!("unexpected HTTP status from unstacking {endpoint}: {status}"),
+    }
+}
+
 fn graphql_search<T, K, F>(gql_query: &str, search_query: &str, key: F) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
@@ -310,11 +341,16 @@ impl Pr {
         Ok(())
     }
 
-    pub fn set_base(&self, base: &str) -> Result<()> {
+    pub fn set_base(&mut self, base: &str) -> Result<()> {
         let mut cmd = gh();
         let args = self.args_for("edit", [format!("--base={base}")])?;
         cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
+        if env::get().dry_run() {
+            eprintln!("would-exec: {:?}", cmd);
+        } else {
+            exec!(env::get(), cmd);
+        }
+        self.base_ref_name = base.to_owned();
         Ok(())
     }
 
@@ -496,12 +532,49 @@ pub fn reconcile_stack(prs: &[&Pr]) -> Result<()> {
             rest_api_empty("POST", endpoint("/add"), Some(additions))?;
         }
     } else {
-        rest_api_empty("DELETE", endpoint("/remove"), Some(&existing))?;
+        unstack(endpoint("/unstack"))?;
         rest_api_empty(
             "POST",
             format!("repos/{owner}/{name}/stacks"),
             Some(&desired),
         )?;
+    }
+    Ok(())
+}
+
+pub fn remove_stack(prs: &[&Pr]) -> Result<()> {
+    let (owner, name) = repo_name()?;
+    let stack_numbers: HashSet<u64> = prs
+        .iter()
+        .filter_map(|pr| pr.stack.as_ref().map(|stack| stack.number))
+        .collect();
+    if stack_numbers.len() > 1 {
+        bail!("local prs belong to multiple GitHub stacks: {stack_numbers:?}");
+    }
+    let Some(stack_number) = stack_numbers.iter().next().copied() else {
+        return Ok(());
+    };
+    let endpoint = format!("repos/{owner}/{name}/stacks/{stack_number}");
+    let stack = rest_stack(endpoint.clone())?;
+    let unmerged: Vec<u64> = stack
+        .pull_requests
+        .iter()
+        .filter(|pr| pr.merged_at.is_none())
+        .map(|pr| pr.number)
+        .collect();
+    let local_count = prs
+        .iter()
+        .filter(|pr| {
+            pr.stack
+                .as_ref()
+                .is_some_and(|stack| stack.number == stack_number)
+        })
+        .count();
+    if local_count != unmerged.len() {
+        bail!("GitHub stack {stack_number} contains unmerged prs outside the local stack");
+    }
+    if !unmerged.is_empty() {
+        unstack(format!("{endpoint}/unstack"))?;
     }
     Ok(())
 }
