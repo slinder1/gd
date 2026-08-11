@@ -66,9 +66,25 @@ fn push(args: &cli::Push) -> Result<()> {
         });
     }
     let has_cycles = detect_cycles(&any_changes);
+    if has_cycles {
+        let stacked_prs: Vec<&Pr> = any_changes
+            .iter()
+            .filter_map(|any_change| match any_change {
+                AnyChange::Change(change) => Some(&change.pr),
+                AnyChange::LocalChange(_) => None,
+            })
+            .collect();
+        gh::remove_stack(&stacked_prs).context("could not remove pr stack for rebase")?;
+        for any_change in any_changes.iter_mut() {
+            if let AnyChange::Change(change) = any_change {
+                change.pr.stack = None;
+                change.pr.stack_entry = None;
+            }
+        }
+    }
     if has_cycles || args.draft {
         any_changes
-            .par_iter()
+            .par_iter_mut()
             .filter_map(|ac| {
                 if let AnyChange::Change(c) = ac {
                     Some(c)
@@ -108,7 +124,7 @@ fn push(args: &cli::Push) -> Result<()> {
     // FIXME: Should try to restore the original branch contents if we fail from this point on. It
     // would be at least an attempt at being "atomic" about the push, and it would mean we don't
     // lose the interdiff in a future re-run.
-    let changes = any_changes
+    let mut changes = any_changes
         .into_par_iter()
         .map(|any_change| {
             let change = match any_change {
@@ -123,17 +139,22 @@ fn push(args: &cli::Push) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()
         .context("could not create new prs")?;
-    changes
-        .par_iter()
+    let bases: Vec<String> = changes
+        .iter()
         .enumerate()
-        .map(|(i, c)| {
-            let parents = &changes[i + 1..];
-            let base = parents
+        .map(|(i, _)| {
+            changes[i + 1..]
                 .iter()
                 .next()
                 .map(|p| p.local_change.remote_branch())
-                .unwrap_or_else(|| env.base_branch().to_owned());
-            if c.pr.base_ref_name != base {
+                .unwrap_or_else(|| env.base_branch().to_owned())
+        })
+        .collect();
+    changes
+        .par_iter_mut()
+        .zip(bases.par_iter())
+        .map(|(c, base)| {
+            if c.pr.base_ref_name != base.as_str() {
                 if c.pr.stack.is_some() {
                     bail!(
                         "cannot retarget pr {} while it is part of a stack",
