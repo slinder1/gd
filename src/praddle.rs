@@ -143,6 +143,8 @@ fn push(args: &cli::Push) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()
         .context("could not set pr bases and bodies")?;
+    gh::reconcile_stack(&changes.iter().map(|change| &change.pr).collect::<Vec<_>>())
+        .context("could not reconcile pr stack")?;
     changes
         .par_iter()
         .zip(diffs)
