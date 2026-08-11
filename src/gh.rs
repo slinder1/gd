@@ -148,24 +148,21 @@ struct GraphQlPageInfo {
     end_cursor: Option<String>,
 }
 
-fn graphql_search<T, K, F>(gql_query: &str, search_query: &str, limit: usize, key: F) -> Result<Vec<T>>
+const GQL_LIMIT: u8 = 100;
+
+fn graphql_search<T, K, F>(gql_query: &str, search_query: &str, key: F) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
     K: Eq + std::hash::Hash,
     F: Fn(&T) -> K,
 {
-    let page_limit = limit.min(100);
-    let mut page_limit = page_limit;
     let mut end_cursor = None;
     let mut seen = HashSet::new();
     let mut nodes = Vec::new();
 
     loop {
-        if page_limit == 0 {
-            break;
-        }
         let search_query_arg = format!("searchQuery={search_query}");
-        let limit_arg = format!("limit={page_limit}");
+        let limit_arg = format!("limit={GQL_LIMIT}");
         let query_arg = format!("query={gql_query}");
         let mut args = vec![
             "api".to_owned(),
@@ -194,9 +191,6 @@ where
         for node in search.nodes {
             if seen.insert(key(&node)) {
                 nodes.push(node);
-                if nodes.len() == limit {
-                    return Ok(nodes);
-                }
             }
         }
 
@@ -209,7 +203,6 @@ where
                 .end_cursor
                 .context("GitHub GraphQL response had no cursor for the next page")?,
         );
-        page_limit = (limit - nodes.len()).min(100);
     }
 
     Ok(nodes)
@@ -358,12 +351,6 @@ pageInfo { hasNextPage endCursor } \
 ";
 
 fn prs() -> Result<Vec<Pr>> {
-    #[derive(Deserialize)]
-    struct GraphQlPr {
-        #[serde(flatten)]
-        pr: Pr,
-    }
-
     let (owner, name) = repo_name()?;
     let search_queries = [
         format!("repo:{owner}/{name} is:pr author:@me state:open"),
@@ -372,11 +359,11 @@ fn prs() -> Result<Vec<Pr>> {
     let mut seen = HashSet::new();
     let mut prs = Vec::new();
     for search_query in search_queries {
-        for pr in graphql_search(PR_GQL_QUERY, &search_query, usize::MAX, |pr: &GraphQlPr| {
-            pr.pr.number
+        for pr in graphql_search(PR_GQL_QUERY, &search_query, |pr: &Pr| {
+            pr.number
         })? {
-            if seen.insert(pr.pr.number) {
-                prs.push(pr.pr);
+            if seen.insert(pr.number) {
+                prs.push(pr);
             }
         }
     }
