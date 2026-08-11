@@ -6,6 +6,7 @@ use crate::env;
 use crate::util::exec;
 use anyhow::{Context, Result, bail};
 use git2::message_trailers_strs;
+use rayon::prelude::*;
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -356,15 +357,15 @@ fn prs() -> Result<Vec<Pr>> {
         format!("repo:{owner}/{name} is:pr author:@me state:open"),
         format!("repo:{owner}/{name} is:pr author:@me is:merged"),
     ];
+    let search_results: Vec<Vec<Pr>> = search_queries
+        .par_iter()
+        .map(|search_query| graphql_search(PR_GQL_QUERY, search_query, |pr: &Pr| pr.number))
+        .collect::<Result<_>>()?;
     let mut seen = HashSet::new();
     let mut prs = Vec::new();
-    for search_query in search_queries {
-        for pr in graphql_search(PR_GQL_QUERY, &search_query, |pr: &Pr| {
-            pr.number
-        })? {
-            if seen.insert(pr.number) {
-                prs.push(pr);
-            }
+    for pr in search_results.into_iter().flatten() {
+        if seen.insert(pr.number) {
+            prs.push(pr);
         }
     }
     Ok(prs)
