@@ -6,9 +6,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 ///
 /// * Never touches your local branches. The tool only reads from your local branch and attempts to
 ///   mirror it to GitHub by: fetching remote tracking branches, force-pushing namespaced refs,
-///   creating PRs, and maintaining PR bodies and comments to present a pseudo-UI for the stack. If
-///   you use the `merge` subcommand, it also touches namespaced git-config entries under
-///   `branch.<name>.praddle-*`, but this is only for optional features.
+///   creating PRs and comments with the official GitHub UI.
 /// * Treats one branch as one patch-stack, where each commit maps 1:1 to a PR.
 /// * Uses the same "Change-Id" trailer used by Gerrit. You can install the commit-msg hook from
 ///   a Gerrit instance or use the install-hook subcommand to install an embedded copy.
@@ -34,11 +32,6 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 ///   but an extremely short-lived review process. Ideas about how to potentially resolve this is
 ///   documented at https://github.com/slinder1/praddle/blob/main/IDEAS.md and contributions are
 ///   welcome!
-/// * Can lose track of merged/closed PR if the user is not careful to use the `merge` subcommand.
-///   This may be mildly confusing, but is more-or-less by design: the change commit which corresponds
-///   to a merged PR will naturally disappear from the branch on rebase. The `merge` subcommand
-///   notes the Change-Id of successful merges in a git-config entry tied to the branch, so
-///   it doesn't forget to count them and link to them, but it is purely aesthetics.
 /// * Currently lacks a lot of polish and documentation.
 ///
 /// It reads configuration from the first of the following:
@@ -53,12 +46,6 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 ///     remote = "origin"
 ///     base_branch = "main"
 ///     user_branch_prefix = "users/$USER/"
-///
-/// The title of PR number `N` in a series of `M` commits is prefixed with:
-///
-/// * `[<branch-desc-first-line>: N/M]: ` if the branch has a description,
-///   editable via `git branch --edit-description`, or
-/// * `[N/M]: ` otherwise.
 ///
 #[derive(Parser)]
 #[command(version, verbatim_doc_comment, args_override_self = true)]
@@ -103,33 +90,12 @@ pub enum Command {
     /// force-pushed to a corresponding branch named `${user_branch_prefix}${change_id}` on
     /// `${remote}`. Each commit will be matched to its existing PR or else a new PR will be
     /// created for it. The PRs will be "stacked" such that they reproduce the local branch
-    /// sequence, with additional trailers in the PR message body to help reviewers navigate the
-    /// stack.
+    /// sequence.
     ///
     /// Note: This command will never modify your commits or refs, even their messages. No local
     /// branches are created or destroyed. All mutation occurs exclusively on the `$remote`.
     #[command(visible_alias = "p")]
     Push(Push),
-    /// With no arguments, print the current stack's short-name. With an argument, set it.
-    ///
-    /// The short-name is tracked in the `branch.<name>.praddle-shortName` git config entry,
-    /// and is used to prefix the PR title, e.g. `[${short-name} 3/5] ...`
-    Name(Name),
-    /// Merge the next change.
-    ///
-    /// If successful, this will modify the local `branch.<name>.praddle-mergedChangeIds` git config
-    /// entry to record that the change was merged. This allows future `praddle push`es to include
-    /// merged changes in the reviewer stack "UI", keeping the relative numbering of changes stable.
-    ///
-    /// If a change's PR is merged in any other way, it will "disappear" from the stack, affecting
-    /// all downstream numbering and the total number of changes in the stack. If you want to
-    /// manually correct this, edit `branch.<name>.praddle-mergedChangeIds` (a ':' separated list) using
-    /// e.g. `git config --edit` and append the merged change's ID to the list (or create it, if it
-    /// does not already exist).
-    ///
-    /// If you don't care about the renumbering behavior, you can safely ignore this subcommand (it
-    /// is purely aesthetic).
-    Merge(Merge),
     /// Print the PR URL of the top-most (i.e. last) change which already has one.
     Url(Url),
     /// Install a commit-msg hook in the current git repo to create `Change-Id:` trailers.
@@ -151,14 +117,6 @@ pub struct Push {
     /// Leave all the PRs as drafts
     pub draft: bool,
 }
-
-#[derive(Args)]
-pub struct Name {
-    pub new_name: Option<String>,
-}
-
-#[derive(Args)]
-pub struct Merge;
 
 #[derive(Args)]
 pub struct Url;

@@ -5,7 +5,6 @@ mod change;
 mod cli;
 mod env;
 mod gh;
-mod metadata;
 mod praddle;
 mod util;
 

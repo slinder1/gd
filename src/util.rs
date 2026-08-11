@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result, bail};
-use git2::{Branch, Config, Repository};
 use std::fmt::Debug;
 use std::process::{Command, Output};
 
@@ -60,73 +59,4 @@ impl<T, E: Debug> Extract for std::result::Result<T, E> {
             }
         }
     }
-}
-
-pub trait RepoExt {
-    fn head_branch(&self) -> Result<Branch<'_>>;
-    fn branch_config<'repo>(&self, branch: &'repo Branch) -> Result<BranchConfig<'repo>>;
-}
-
-impl RepoExt for Repository {
-    fn head_branch<'repo>(&'repo self) -> Result<Branch<'repo>> {
-        let branch = self.head().context("unknown HEAD")?;
-        if !branch.is_branch() {
-            bail!("HEAD is not a branch");
-        }
-        Ok(Branch::wrap(branch))
-    }
-    fn branch_config<'repo>(&self, branch: &'repo Branch) -> Result<BranchConfig<'repo>> {
-        BranchConfig::new(self, branch)
-    }
-}
-
-pub struct BranchConfig<'repo> {
-    branch_name: &'repo str,
-    config: Config,
-}
-
-impl<'repo> BranchConfig<'repo> {
-    pub fn new(repo: &Repository, branch: &'repo Branch<'_>) -> Result<Self> {
-        let branch_name = branch_name(branch)?;
-        let config = config(repo)?;
-        Ok(Self {
-            branch_name,
-            config,
-        })
-    }
-    fn format_key(&self, key: &str) -> String {
-        format!("branch.{}.praddle-{key}", self.branch_name)
-    }
-    pub fn get(&self, key: &str) -> Result<String> {
-        let config_key = self.format_key(key);
-        let value_result = self.config.get_entry(config_key.as_str());
-        let value = match value_result {
-            Ok(ce) => ce
-                .value()
-                .context("error getting config entry value")?
-                .to_string(),
-            // all the config values can safely default to the empty string
-            Err(e) if e.code() == git2::ErrorCode::NotFound => "".to_string(),
-            Err(e) => return Err(anyhow::Error::new(e).context("error getting config entry")),
-        };
-        Ok(value)
-    }
-    pub fn set(&mut self, key: &str, val: &str) -> Result<()> {
-        let config_key = self.format_key(key);
-        self.config
-            .set_str(config_key.as_str(), val)
-            .with_context(|| format!("could not update config key {config_key}"))?;
-        Ok(())
-    }
-}
-
-fn branch_name<'repo>(branch: &'repo Branch) -> Result<&'repo str> {
-    branch
-        .name()
-        .context("HEAD branch has no name")?
-        .context("HEAD branch name is not valid utf-8")
-}
-
-fn config(repo: &Repository) -> Result<Config> {
-    repo.config().context("repo has no config")
 }

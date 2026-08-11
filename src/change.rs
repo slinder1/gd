@@ -143,53 +143,6 @@ pub struct Change {
 }
 
 impl Change {
-    pub fn render_pr_ui(
-        &self,
-        changes: &[Self],
-        short_name: &str,
-        merged_prs: &[Pr],
-    ) -> Result<()> {
-        let commit = self.local_change.commit()?;
-        let mut index = None;
-        let title = String::from(
-            commit
-                .summary()
-                .context("failed to get commit summary")?
-                .context("commit has no summary")?,
-        );
-        let mut body = String::from(
-            commit
-                .body()
-                .context("failed to get commit body")?
-                .context("commit has no body")?,
-        );
-        body.push_str("\n\n---\n\n");
-        body.push_str("**Stack**:\n");
-        for (i, c) in changes.iter().enumerate() {
-            body.push_str(&format!("- #{}", c.pr.number));
-            if self.pr.number == c.pr.number {
-                index = Some(i);
-                body.push('⬅');
-            }
-            body.push('\n');
-        }
-        let index = index.expect(
-            "render_pr_ui asked to render into a stack of changes which does not contain self?",
-        );
-        for pr in merged_prs.iter().rev() {
-            body.push_str(&format!("- #{}\n", pr.number));
-        }
-        body.push_str(&format!("- `{}`\n\n<sub>(Note: Closed and merged PRs may not be reflected here and PR numbering is not stable.)</sub>\n", env::get().base_branch()));
-        let count = changes.len() + merged_prs.len();
-        let position = count - index;
-        let prefix = if short_name.is_empty() {
-            "".into()
-        } else {
-            format!("{}: ", short_name)
-        };
-        self.pr
-            .set_title_and_body(&format!("[{prefix}{position}/{count}]: {title}"), &body)
-    }
     /// Adapted from https://joshcannon.me/2025/04/05/pr-interdiff.html
     pub fn interdiff(&self) -> Result<String> {
         let change = self.local_change.id.as_str();
@@ -235,15 +188,6 @@ impl Change {
         diff.print(DiffFormat::Patch, diff_printer(&mut out))
             .with_context(|| format!("failed to generate interdiff for change {change}"))?;
         Ok(out)
-    }
-    pub fn merge(&self) -> Result<()> {
-        let commit = self.local_change.commit()?;
-        let subject_raw = commit.summary()?.context("couldn't get summary")?;
-        let subject = format!("{} (#{})", subject_raw, self.pr.number);
-        let body = commit.body()?.context("couldn't get summary")?;
-        let sha = format!("{}", self.local_change.oid);
-        self.pr.merge(&subject, body, &sha)?;
-        Ok(())
     }
 }
 
