@@ -133,12 +133,20 @@ fn push(args: &cli::Push) -> Result<()> {
                 .next()
                 .map(|p| p.local_change.remote_branch())
                 .unwrap_or_else(|| env.base_branch().to_owned());
-            c.pr.set_base(base.as_ref()).with_context(|| {
-                format!(
-                    "could not retarget pr {} to branch: {:?}",
-                    c.pr.number, base,
-                )
-            })?;
+            if c.pr.base_ref_name != base {
+                if c.pr.stack.is_some() {
+                    bail!(
+                        "cannot retarget pr {} while it is part of a stack",
+                        c.pr.number
+                    );
+                }
+                c.pr.set_base(base.as_ref()).with_context(|| {
+                    format!(
+                        "could not retarget pr {} to branch: {:?}",
+                        c.pr.number, base,
+                    )
+                })?;
+            }
             Ok(())
         })
         .collect::<Result<Vec<_>>>()
