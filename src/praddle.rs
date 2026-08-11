@@ -48,8 +48,7 @@ fn push(args: &cli::Push) -> Result<()> {
     }
     let local_changes =
         change::get_local_changes().context("could not enumerate current local branch")?;
-    let mut prs_by_change_id = gh::prs_by_change_id(|pr| !pr.in_state(PrState::Closed))
-        .context("could not enumerate remote prs")?;
+    let mut prs_by_change_id = gh::prs_by_change_id().context("could not enumerate remote prs")?;
     let mut any_changes = vec![];
     for local_change in local_changes {
         any_changes.push(match prs_by_change_id.remove(&local_change.id) {
@@ -144,6 +143,8 @@ fn push(args: &cli::Push) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()
         .context("could not set pr bases and bodies")?;
+    gh::reconcile_stack(&changes.iter().map(|change| &change.pr).collect::<Vec<_>>())
+        .context("could not reconcile pr stack")?;
     changes
         .par_iter()
         .zip(diffs)
@@ -183,8 +184,7 @@ fn detect_cycles(any_changes: &[AnyChange]) -> bool {
 fn url(_args: &cli::Url) -> Result<()> {
     let local_changes =
         change::get_local_changes().context("could not enumerate current local branch")?;
-    let mut prs_by_change_id = gh::prs_by_change_id(|pr| !pr.in_state(PrState::Closed))
-        .context("could not enumerate remote prs")?;
+    let mut prs_by_change_id = gh::prs_by_change_id().context("could not enumerate remote prs")?;
     for local_change in local_changes {
         if let Some(pr) = prs_by_change_id.remove(&local_change.id) {
             println!("{}", pr.get_url()?);
