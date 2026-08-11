@@ -10,5 +10,7 @@ mod praddle;
 mod util;
 
 fn main() -> anyhow::Result<()> {
-    praddle::praddle()
+    use clap::Parser;
+
+    praddle::praddle(cli::Cli::parse())
 }

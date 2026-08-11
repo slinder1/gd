@@ -6,15 +6,15 @@ use git2::{Branch, Config, Repository};
 use std::fmt::Debug;
 use std::process::{Command, Output};
 
-pub fn exec_impl(cmd: &mut Command) -> Result<Output> {
-    let id = crate::env::next_exec_id();
-    if crate::env::always_echo() {
+pub fn exec_impl(env: &crate::env::Env, cmd: &mut Command) -> Result<Output> {
+    let id = env.next_exec_id();
+    if env.always_echo() {
         eprintln!("exec-{}: {:?}", id, cmd);
     }
     let output = cmd
         .output()
         .with_context(|| format!("exec-failed: {:?}", cmd))?;
-    if crate::env::always_echo() || !output.status.success() {
+    if env.always_echo() || !output.status.success() {
         for line in String::from_utf8_lossy(output.stdout.as_ref()).lines() {
             eprintln!("exec-{}-stdout: {}", id, line);
         }
@@ -29,15 +29,15 @@ pub fn exec_impl(cmd: &mut Command) -> Result<Output> {
 }
 
 macro_rules! exec {
-    ($cmd:ident) => {
-        $crate::util::exec_impl(&mut $cmd)?
+    ($env:expr, $cmd:ident) => {
+        $crate::util::exec_impl($env, &mut $cmd)?
     };
-    (dry_return=$dry_return:expr, $cmd:ident) => {{
-        if $crate::env::dry_run() {
+    ($env:expr, dry_return=$dry_return:expr, $cmd:ident) => {{
+        if $env.dry_run() {
             eprintln!("would-exec: {:?}", $cmd);
             return Ok($dry_return);
         } else {
-            $crate::util::exec!($cmd)
+            $crate::util::exec!($env, $cmd)
         }
     }};
 }

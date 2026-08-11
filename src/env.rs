@@ -1,22 +1,15 @@
 // Copyright © 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-// FIXME: Newer rustc has started complaining about some of the types
-// used through lazy_static, the plan is to remove most uses of
-// lazy_static anyway so just bandaiding it for now.
-#![allow(dead_code)]
-
 use crate::cli::Cli;
-use crate::util::Extract;
 use anyhow::{Context, Result, bail};
 use atomic_counter::{AtomicCounter, RelaxedCounter};
-use clap::Parser;
 use git2::Repository;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, read_to_string};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use thread_local::ThreadLocal;
 
 pub struct ThreadLocalRepo {
@@ -37,15 +30,116 @@ impl ThreadLocalRepo {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-pub struct Config {
+struct FileConfig {
     remote: String,
     base_branch: String,
     user_branch_prefix: String,
     reviewer_groups: Option<HashMap<String, Vec<String>>>,
 }
 
-fn repo_config_path(filename: &str) -> Option<PathBuf> {
-    REPO.get()
+pub struct Env {
+    cli: Cli,
+    remote: String,
+    base_branch: String,
+    user_branch_prefix: String,
+    reviewer_groups: Option<HashMap<String, Vec<String>>>,
+    repo: ThreadLocalRepo,
+    exec_ids: RelaxedCounter,
+}
+
+impl Env {
+    pub fn new(cli: Cli) -> Result<Self> {
+        let repo = ThreadLocalRepo::new(".".into());
+        let file_config = read_config(&repo)?;
+        let remote = cli.globals.remote.clone().unwrap_or(file_config.remote);
+        let base_branch = cli
+            .globals
+            .base_branch
+            .clone()
+            .unwrap_or(file_config.base_branch);
+        let user_branch_prefix = cli
+            .globals
+            .user_branch_prefix
+            .clone()
+            .unwrap_or(file_config.user_branch_prefix);
+        if remote.is_empty() {
+            bail!("field `remote` cannot be empty");
+        }
+        if base_branch.is_empty() {
+            bail!("field `base_branch` cannot be empty");
+        }
+        if !user_branch_prefix.is_empty() && !user_branch_prefix.ends_with('/') {
+            bail!("if field `user_branch_prefix` is non-empty it must end with `/`");
+        }
+        Ok(Self {
+            cli,
+            remote,
+            base_branch,
+            user_branch_prefix,
+            reviewer_groups: file_config.reviewer_groups,
+            repo,
+            exec_ids: RelaxedCounter::new(0),
+        })
+    }
+
+    pub fn cli(&self) -> &Cli {
+        &self.cli
+    }
+
+    pub fn repo(&self) -> Result<&Repository, git2::Error> {
+        self.repo.get()
+    }
+
+    pub fn dry_run(&self) -> bool {
+        self.cli.globals.dry_run
+    }
+
+    pub fn verbose(&self) -> bool {
+        self.cli.globals.verbose
+    }
+
+    pub fn always_echo(&self) -> bool {
+        self.dry_run() || self.verbose()
+    }
+
+    pub fn next_exec_id(&self) -> usize {
+        self.exec_ids.inc()
+    }
+
+    pub fn remote(&self) -> &str {
+        &self.remote
+    }
+
+    pub fn base_branch(&self) -> &str {
+        &self.base_branch
+    }
+
+    pub fn base_branch_ref(&self) -> String {
+        format!("refs/heads/{}", self.base_branch)
+    }
+
+    pub fn user_branch_prefix(&self) -> &str {
+        &self.user_branch_prefix
+    }
+
+    pub fn reviewer_groups(&self) -> Option<&HashMap<String, Vec<String>>> {
+        self.reviewer_groups.as_ref()
+    }
+}
+
+static ENV: OnceLock<Env> = OnceLock::new();
+
+pub fn init(cli: Cli) -> Result<()> {
+    ENV.set(Env::new(cli)?)
+        .map_err(|_| anyhow::anyhow!("environment was initialized more than once"))
+}
+
+pub fn get() -> &'static Env {
+    ENV.get().expect("environment must be initialized")
+}
+
+fn repo_config_path(repo: &ThreadLocalRepo, filename: &str) -> Option<PathBuf> {
+    repo.get()
         .ok()
         .and_then(|r| r.workdir())
         .map(|wd| wd.join(filename))
@@ -58,97 +152,17 @@ fn user_config_path(filename: &str) -> Option<PathBuf> {
         .filter(|p| fs::exists(p).unwrap_or(false))
 }
 
-fn read_config() -> Result<Config> {
+fn read_config(repo: &ThreadLocalRepo) -> Result<FileConfig> {
     let path = std::env::var_os("PRADDLE_CONFIG_PATH")
         .map(PathBuf::from)
-        .or_else(|| repo_config_path(".praddle.toml"))
-        .or_else(|| repo_config_path("praddle.toml"))
+        .or_else(|| repo_config_path(repo, ".praddle.toml"))
+        .or_else(|| repo_config_path(repo, "praddle.toml"))
         .or_else(|| user_config_path("praddle.toml"));
     let path = match path {
         Some(p) => p,
-        None => {
-            // We will catch this later when the config is validated, but we cannot
-            // fail here or -h/--help will not be reached.
-            return Ok(Default::default());
-        }
+        None => return Ok(Default::default()),
     };
     let contents = read_to_string(path.clone())
         .with_context(|| format!("could not read config file: {path:?}"))?;
-    let config: Config = toml::from_str(contents.as_ref())
-        .with_context(|| format!("invalid config file: {path:?}"))?;
-    Ok(config)
-}
-
-lazy_static! {
-    static ref REPO: ThreadLocalRepo = ThreadLocalRepo::new(".".into());
-    static ref CONFIG: Config = read_config().extract();
-    static ref CLI: Cli = Cli::parse();
-    static ref BASE_BRANCH_REF: String = format!("refs/heads/{}", base_branch());
-    static ref EXEC_IDS: RelaxedCounter = RelaxedCounter::new(0);
-}
-
-pub fn validate() -> Result<()> {
-    if remote().is_empty() {
-        bail!("field `remote` cannot be empty");
-    }
-    if base_branch().is_empty() {
-        bail!("field `base_branch` cannot be empty");
-    }
-    if !user_branch_prefix().is_empty() && !user_branch_prefix().ends_with('/') {
-        bail!("if field `user_branch_prefix` is non-empty it must end with `/`");
-    }
-    Ok(())
-}
-
-pub fn cli() -> &'static Cli {
-    &CLI
-}
-
-pub fn remote() -> &'static str {
-    CLI.globals
-        .remote
-        .as_deref()
-        .unwrap_or(CONFIG.remote.as_str())
-}
-
-pub fn base_branch() -> &'static str {
-    CLI.globals
-        .base_branch
-        .as_deref()
-        .unwrap_or(CONFIG.base_branch.as_str())
-}
-
-pub fn base_branch_ref() -> &'static str {
-    BASE_BRANCH_REF.as_ref()
-}
-
-pub fn user_branch_prefix() -> &'static str {
-    CLI.globals
-        .user_branch_prefix
-        .as_deref()
-        .unwrap_or(CONFIG.user_branch_prefix.as_str())
-}
-
-pub fn reviewer_groups() -> Option<&'static HashMap<String, Vec<String>>> {
-    CONFIG.reviewer_groups.as_ref()
-}
-
-pub fn dry_run() -> bool {
-    CLI.globals.dry_run
-}
-
-pub fn verbose() -> bool {
-    CLI.globals.verbose
-}
-
-pub fn always_echo() -> bool {
-    dry_run() || verbose()
-}
-
-pub fn repo() -> &'static Repository {
-    REPO.get().context("not in a git repo").extract()
-}
-
-pub fn next_exec_id() -> usize {
-    EXEC_IDS.inc()
+    toml::from_str(contents.as_ref()).with_context(|| format!("invalid config file: {path:?}"))
 }
