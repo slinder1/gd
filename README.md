@@ -1,6 +1,6 @@
 GitHub stacked-PR builder for those who miss Gerrit
 
-See `--help` for more.
+See `--help` for details.
 
 # Etymology
 
@@ -10,9 +10,39 @@ The name doesn't meaning anything, but it sounds like "prattle", which I enjoy.
 
 A backronym might be "Pull Request, Add (Little Endian)".
 
+# LLM use
+
+It is unfortunate that this tool needs to exist at all, and even more
+unfortunate that I don't have the time to dedicate to doing it right.
+
+All development up to commit 0948335884fcb2645ada3985ff4c05dcf075b4f2 (v0.10.0)
+was done by hand without LLMs, but at the point when GitHub rolled out their
+(rather poor) support for stacks as a reified concept, I started using LLMs to
+deal with what I perceive as design defects in their model.
+
+# Testing
+
+There isn't any!
+
+There isn't really a great excuse, I simply don't feel like
+mocking the `gh` tool or GitHub API, and haven't really thought of a better
+approach. There could be some more isolation of the core algorithms, and those
+could be unit tested, but I really just needed a sort-of-working thing so
+I could get back to the actual work that GitHub generally prevents me from
+doing.
+
+I welcome contributions here! If the tool has any merit it will eventually need
+robust tests.
+
 # Alternatives
 
 ## `spr`
+
+Somewhat confusingly there are at least two tools which nominally do the same
+thing and are called `spr`. I'm unsure which came first, and it doesn't really
+matter, but it is unfortunate they collide.
+
+### `ejoffe/spr`
 
 A very compelling alternative to `praddle` is https://github.com/ejoffe/spr which
 differs in a few ways:
@@ -21,8 +51,8 @@ differs in a few ways:
   non-destructive operations (i.e. when you try to `update` the remote)
 * `spr` won't use Gerrit `Change-Id:`, and is very particular about the format
   of its ID; `praddle` allows any string and uses the `Change-Id:` trailer
-* `spr` does not seem to have a `dry-run` option, so modifications aren't
-  foreseeable
+* `spr` does not seem to have a `dry-run` option, which makes using it
+  generally more nerve-wracking than necessary
 * `spr` doesn't produce an "interdiff" when force-pushing to give the reviewer
   context for the edits to the change
 * `spr` installs itself as a git subcommand (this is really just an aesthetic
@@ -38,6 +68,23 @@ differs in a few ways:
 
 In the end most of these are fairly aesthetic and minor, but rather than try to
 hack on `spr` I opted to start over and make the exact tool I wanted. YMMV
+
+### `spacedentist/spr`
+
+Another great contender, https://github.com/spacedentist/spr uses multiple
+branches per PR to allow the local branch to be maintained as a set of changes
+that is amended and rebased, while only fast-forwarding remote refs associated
+with PRs so the GitHub UI doesn't throw away the context of comments and
+collapse timeline entries.
+
+The biggest issue (now) with this approach is that GitHub chose to codify the
+force-push as a requirement in their model of stacks. So now, you can either
+choose to contort your remote refs to avoid GitHub throwing away a bunch of
+valuable information when you force-push, or you can have the new shiny
+stack UI and merge queue. You can't have both!
+
+There are other quibbles I have with this `spr`, but I think this is now the
+overriding reason that I will not adopt this model.
 
 ## `gherrit`
 
