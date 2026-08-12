@@ -48,6 +48,9 @@ fn push(args: &cli::Push) -> Result<()> {
     }
     let local_changes =
         change::get_local_changes().context("could not enumerate current local branch")?;
+    if local_changes.is_empty() {
+        bail!("no local changes");
+    }
     let mut prs_by_change_id = gh::prs_by_change_id().context("could not enumerate remote prs")?;
     let mut any_changes = vec![];
     for local_change in local_changes {
