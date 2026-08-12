@@ -13,7 +13,7 @@ use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pr {
     pub number: u64,
@@ -27,12 +27,12 @@ pub struct Pr {
     pub stack_entry: Option<PrStackEntry>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct PrStack {
     pub number: u64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct PrStackEntry {
     pub position: u64,
 }
@@ -309,6 +309,20 @@ where
 }
 
 impl Pr {
+    pub fn mock(title: &str, body: &str, base: &str) -> Self {
+        let env = env::get();
+        Self {
+            number: env.next_mock_pr_id() as u64,
+            title: title.to_owned(),
+            body: body.to_owned(),
+            state: PrState::Open,
+            base_ref_name: base.to_owned(),
+            draft: true,
+            stack: None,
+            stack_entry: None,
+        }
+    }
+
     fn args_for<I, S>(&self, subcommand: &str, opts: I) -> Result<Vec<String>>
     where
         I: IntoIterator<Item = S>,
@@ -442,7 +456,14 @@ impl Pr {
             format!("--head={remote_branch_ref}"),
         ];
         cmd.args(args);
-        let output = exec!(env::get(), dry_return = Pr::default(), cmd);
+        let output = if env::get().dry_run() {
+            eprintln!("would-exec: {:?}", cmd);
+            let mock_pr = Pr::mock(title, body, base);
+            eprintln!("mock-pr-for-change-{}: {}", local_change.id, mock_pr.number);
+            return Ok(mock_pr);
+        } else {
+            exec!(env::get(), cmd)
+        };
         for line in String::from_utf8_lossy(output.stdout.as_ref()).lines() {
             if line.starts_with("https://github.com") {
                 let mut path_components = line.rsplitn(2, '/');

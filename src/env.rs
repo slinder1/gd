@@ -45,6 +45,7 @@ pub struct Env {
     reviewer_groups: Option<HashMap<String, Vec<String>>>,
     repo: ThreadLocalRepo,
     exec_ids: RelaxedCounter,
+    mock_pr_ids: RelaxedCounter,
 }
 
 impl Env {
@@ -79,6 +80,7 @@ impl Env {
             reviewer_groups: file_config.reviewer_groups,
             repo,
             exec_ids: RelaxedCounter::new(0),
+            mock_pr_ids: RelaxedCounter::new(0xffff_ffff),
         })
     }
 
@@ -104,6 +106,10 @@ impl Env {
 
     pub fn next_exec_id(&self) -> usize {
         self.exec_ids.inc()
+    }
+
+    pub fn next_mock_pr_id(&self) -> usize {
+        self.mock_pr_ids.inc()
     }
 
     pub fn remote(&self) -> &str {
