@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "praddle"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atomic-counter",
