@@ -51,7 +51,7 @@ where
             eprintln!(
                 "file-contents-{}: {}",
                 file.path().display(),
-                String::from_utf8_lossy(&*contents)
+                String::from_utf8_lossy(&contents)
             );
         }
     }
@@ -66,8 +66,8 @@ pub fn exec_impl(env: &crate::env::Env, cmd: &mut Command) -> Result<Output> {
     let output = cmd
         .output()
         .with_context(|| format!("exec-failed: {:?}", cmd))?;
-    if env.dry_run() || env.verbosity() > 0 || !output.status.success() {
-        let truncate = env.verbosity() == 1;
+    if env.always_echo() || !output.status.success() {
+        let truncate = env.verbosity() <= 1;
         print_output(
             &format!("exec-{id}-stdout: "),
             output.stdout.as_ref(),
