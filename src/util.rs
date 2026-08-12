@@ -4,6 +4,7 @@
 use anyhow::{Context, Result, bail};
 use std::fmt::Debug;
 use std::process::{Command, Output};
+use tempfile::NamedTempFile;
 
 const MAX_VERBOSE_LINE_BYTES: usize = 100;
 
@@ -36,6 +37,27 @@ fn print_output(prefix: &str, output: &[u8], truncate: bool) {
     }
 }
 
+pub fn print_cmd_and_files<'a, I>(cmd: &Command, files: I) -> Result<()>
+where
+    I: Iterator<Item = &'a NamedTempFile>,
+{
+    let env = crate::env::get();
+    if env.dry_run() {
+        eprintln!("would-exec: {:?}", cmd);
+    }
+    if env.always_echo() {
+        for file in files {
+            let contents = std::fs::read(file.path())?;
+            eprintln!(
+                "file-contents-{}: {}",
+                file.path().display(),
+                String::from_utf8_lossy(&*contents)
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn exec_impl(env: &crate::env::Env, cmd: &mut Command) -> Result<Output> {
     let id = env.next_exec_id();
     if env.always_echo() {
@@ -63,20 +85,9 @@ pub fn exec_impl(env: &crate::env::Env, cmd: &mut Command) -> Result<Output> {
     Ok(output)
 }
 
-macro_rules! exec {
-    ($env:expr, $cmd:ident) => {
-        $crate::util::exec_impl($env, &mut $cmd)?
-    };
-    ($env:expr, dry_return=$dry_return:expr, $cmd:ident) => {{
-        if $env.dry_run() {
-            eprintln!("would-exec: {:?}", $cmd);
-            return Ok($dry_return);
-        } else {
-            $crate::util::exec!($env, $cmd)
-        }
-    }};
+pub fn exec(cmd: &mut Command) -> Result<Output> {
+    exec_impl(crate::env::get(), cmd)
 }
-pub(crate) use exec;
 
 pub trait Extract {
     type T;

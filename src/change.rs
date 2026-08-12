@@ -3,7 +3,7 @@
 
 use crate::env;
 use crate::gh::Pr;
-use crate::util::exec;
+use crate::util::{exec, print_cmd_and_files};
 use anyhow::{Context, Result, bail};
 use git2::{
     Commit, DiffDelta, DiffFormat, DiffHunk, DiffLine, DiffOptions, FileFavor, MergeOptions, Oid,
@@ -107,7 +107,11 @@ impl LocalChange {
         ];
         args.extend(refspecs);
         cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
+        if env::get().dry_run() {
+            print_cmd_and_files(&cmd, std::iter::empty())?;
+            return Ok(());
+        }
+        exec(&mut cmd)?;
         Ok(())
     }
     pub fn fetch_all<'a, I: Iterator<Item = &'a Self>>(iterator: I) -> Result<()> {
@@ -121,7 +125,11 @@ impl LocalChange {
         let mut args = vec!["fetch".to_string(), env::get().remote().into()];
         args.extend(refspecs);
         cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
+        if env::get().dry_run() {
+            print_cmd_and_files(&cmd, std::iter::empty())?;
+            return Ok(());
+        }
+        exec(&mut cmd)?;
         Ok(())
     }
     pub fn diff(&self) -> Result<String> {

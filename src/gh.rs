@@ -3,7 +3,7 @@
 
 use crate::change::{Diff, LocalChange};
 use crate::env;
-use crate::util::exec;
+use crate::util::{exec, print_cmd_and_files};
 use anyhow::{Context, Result, bail};
 use git2::message_trailers_strs;
 use rayon::prelude::*;
@@ -180,7 +180,7 @@ fn rest_stack(endpoint: String) -> Result<RestStack> {
     ];
     let mut cmd = gh();
     cmd.args(args);
-    let output = exec!(env::get(), cmd);
+    let output = exec(&mut cmd)?;
     Ok(serde_json::from_slice(output.stdout.as_ref())?)
 }
 
@@ -212,10 +212,10 @@ fn rest_api_empty(method: &str, endpoint: String, body: Option<&[u64]>) -> Resul
     let mut cmd = gh();
     cmd.args(args);
     if env::get().dry_run() {
-        eprintln!("would-exec: {:?}", cmd);
+        print_cmd_and_files(&cmd, input.as_ref().into_iter().map(|(_, file)| file))?;
         return Ok(());
     }
-    exec!(env::get(), cmd);
+    exec(&mut cmd)?;
     Ok(())
 }
 
@@ -233,10 +233,10 @@ fn unstack(endpoint: String) -> Result<()> {
         "--include",
     ]);
     if env::get().dry_run() {
-        eprintln!("would-exec: {:?}", cmd);
+        print_cmd_and_files(&cmd, std::iter::empty())?;
         return Ok(());
     }
-    let output = exec!(env::get(), cmd);
+    let output = exec(&mut cmd)?;
     let status = String::from_utf8_lossy(output.stdout.as_ref())
         .lines()
         .next()
@@ -280,7 +280,7 @@ where
 
         let mut cmd = gh();
         cmd.args(args);
-        let output = exec!(env::get(), cmd);
+        let output = exec(&mut cmd)?;
         let response: GraphQlResponse<GraphQlSearchData<T>> =
             serde_json::from_slice(output.stdout.as_ref())?;
         let data = response
@@ -358,9 +358,9 @@ impl Pr {
         let args = self.args_for("ready", opts)?;
         cmd.args(args);
         if env::get().dry_run() {
-            eprintln!("would-exec: {:?}", cmd);
+            print_cmd_and_files(&cmd, std::iter::empty())?;
         } else {
-            exec!(env::get(), cmd);
+            exec(&mut cmd)?;
         }
         self.draft = draft;
         Ok(())
@@ -371,9 +371,9 @@ impl Pr {
         let args = self.args_for("edit", [format!("--base={base}")])?;
         cmd.args(args);
         if env::get().dry_run() {
-            eprintln!("would-exec: {:?}", cmd);
+            print_cmd_and_files(&cmd, std::iter::empty())?;
         } else {
-            exec!(env::get(), cmd);
+            exec(&mut cmd)?;
         }
         self.base_ref_name = base.to_owned();
         Ok(())
@@ -388,9 +388,9 @@ impl Pr {
         let args = self.args_for("edit", [format!("--title={title}"), body_arg.arg(body)?])?;
         cmd.args(args);
         if env::get().dry_run() {
-            eprintln!("would-exec: {:?}", cmd);
+            print_cmd_and_files(&cmd, body_arg.file.iter())?;
         } else {
-            exec!(env::get(), cmd);
+            exec(&mut cmd)?;
         }
         self.title = title.to_owned();
         self.body = body.to_owned();
@@ -412,7 +412,11 @@ impl Pr {
         let mut cmd = gh();
         let args = self.args_for("comment", [body_arg.arg(comment)?])?;
         cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
+        if env::get().dry_run() {
+            print_cmd_and_files(&cmd, body_arg.file.iter())?;
+            return Ok(());
+        }
+        exec(&mut cmd)?;
         Ok(())
     }
 
@@ -423,7 +427,11 @@ impl Pr {
         let mut cmd = gh();
         let args = self.args_for("edit", [format!("--add-reviewer={}", reviewers.join(","))])?;
         cmd.args(args);
-        exec!(env::get(), dry_return = (), cmd);
+        if env::get().dry_run() {
+            print_cmd_and_files(&cmd, std::iter::empty())?;
+            return Ok(());
+        }
+        exec(&mut cmd)?;
         Ok(())
     }
 
@@ -457,12 +465,12 @@ impl Pr {
         ];
         cmd.args(args);
         let output = if env::get().dry_run() {
-            eprintln!("would-exec: {:?}", cmd);
+            print_cmd_and_files(&cmd, body_arg.file.iter())?;
             let mock_pr = Pr::mock(title, body, base);
             eprintln!("mock-pr-for-change-{}: {}", local_change.id, mock_pr.number);
             return Ok(mock_pr);
         } else {
-            exec!(env::get(), cmd)
+            exec(&mut cmd)?
         };
         for line in String::from_utf8_lossy(output.stdout.as_ref()).lines() {
             if line.starts_with("https://github.com") {
