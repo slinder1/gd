@@ -140,7 +140,7 @@ jobs:
             -v $HOME/.cargo/registry/:/root/.cargo/registry \
             -v "$(pwd)":/home/rust/src \
             blackdex/rust-musl:x86_64-musl-nightly \
-            /bin/sh -c 'cargo build --release --artifact-dir=. -Z unstable-options && cargo install cargo-deb && cargo deb --target x86_64-unknown-linux-musl --output cgh-amd64-musl.deb'
+            /bin/sh -c 'cargo build --release --artifact-dir=. -Z unstable-options && cargo install cargo-deb && cargo deb --target x86_64-unknown-linux-musl --output praddle-amd64-musl.deb'
 
       - name: Release
         uses: softprops/action-gh-release@v1
@@ -150,5 +150,5 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
           files: |
-            cgh-amd64-musl.deb
-            cgh
+            praddle-amd64-musl.deb
+            praddle
