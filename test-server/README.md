@@ -18,4 +18,12 @@ The first stdout line contains the selected TCP address and Unix socket as JSON.
 git config --global url.http://ADDRESS/OWNER/REPO.insteadOf https://github.com/OWNER/REPO
 ```
 
-Tests should prefer `TestServer::start` and `TestServer::apply_environment`; these isolate both settings from the user's configuration.
+Tests should prefer `TestHarness::start`. It creates a temporary bare remote and
+worktree, configures a test identity, commits and pushes an empty `main` base,
+checks out a `change` branch, starts the server, and isolates both `gh` and Git
+settings from the user's configuration. `TestHarness::git`,
+`TestHarness::write`, and `TestHarness::command` provide the common operations
+needed by scenarios.
+
+`TestRepository` and `TestServer` remain available separately for tests that
+need nonstandard repository or server setup.
