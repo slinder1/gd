@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
 };
 use tempfile::TempDir;
@@ -61,6 +62,160 @@ struct AppState {
     repository: String,
     git_dir: PathBuf,
     model: Arc<Mutex<Model>>,
+}
+
+pub struct TestRepository {
+    _root: TempDir,
+    worktree: PathBuf,
+    git_dir: PathBuf,
+}
+
+impl TestRepository {
+    pub fn init(owner: &str, repository: &str) -> Result<Self> {
+        validate_name("owner", owner)?;
+        validate_name("repository", repository)?;
+        let root = tempfile::tempdir()?;
+        let worktree = root.path().join("worktree");
+        let git_dir = root.path().join("remote.git");
+        fs::create_dir(&worktree)?;
+
+        run_git(
+            root.path(),
+            ["init", "--bare", "--initial-branch=main", path(&git_dir)?],
+        )?;
+        run_git(&worktree, ["init", "--initial-branch=main"])?;
+        run_git(&worktree, ["config", "user.name", "Praddle Test"])?;
+        run_git(&worktree, ["config", "user.email", "praddle@example.com"])?;
+        run_git(&worktree, ["commit", "--allow-empty", "-m", "Base"])?;
+        run_git(&worktree, ["remote", "add", "origin", path(&git_dir)?])?;
+        run_git(&worktree, ["push", "--set-upstream", "origin", "main"])?;
+        run_git(&worktree, ["checkout", "-b", "change"])?;
+        let remote_url = format!("https://github.com/{owner}/{repository}");
+        run_git(
+            &worktree,
+            ["remote", "set-url", "origin", remote_url.as_str()],
+        )?;
+
+        Ok(Self {
+            _root: root,
+            worktree,
+            git_dir,
+        })
+    }
+
+    pub fn git<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        run_git(&self.worktree, args)
+    }
+
+    pub fn write(&self, relative_path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()> {
+        let destination = self.worktree.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(destination, contents)?;
+        Ok(())
+    }
+
+    pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = Command::new(program);
+        command.current_dir(&self.worktree);
+        command
+    }
+
+    pub fn remote_ref_exists(&self, reference: &str) -> Result<bool> {
+        Ok(Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", reference])
+            .current_dir(&self.git_dir)
+            .status()?
+            .success())
+    }
+
+    pub fn worktree(&self) -> &Path {
+        &self.worktree
+    }
+
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+}
+
+pub struct TestHarness {
+    server: TestServer,
+    repository: TestRepository,
+}
+
+impl TestHarness {
+    pub async fn start(owner: &str, repository: &str) -> Result<Self> {
+        let test_repository = TestRepository::init(owner, repository)?;
+        let server = TestServer::start(owner, repository, test_repository.git_dir()).await?;
+        Ok(Self {
+            server,
+            repository: test_repository,
+        })
+    }
+
+    pub fn git<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.repository.git(args)
+    }
+
+    pub fn write(&self, relative_path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()> {
+        self.repository.write(relative_path, contents)
+    }
+
+    pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = self.repository.command(program);
+        self.server.apply_environment(&mut command);
+        command
+    }
+
+    pub fn remote_ref_exists(&self, reference: &str) -> Result<bool> {
+        self.repository.remote_ref_exists(reference)
+    }
+
+    pub fn worktree(&self) -> &Path {
+        self.repository.worktree()
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.server.snapshot()
+    }
+
+    pub fn server(&self) -> &TestServer {
+        &self.server
+    }
+}
+
+fn run_git<I, S>(directory: &Path, args: I) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command.args(args).current_dir(directory);
+    let output = command
+        .output()
+        .with_context(|| format!("could not execute {command:?}"))?;
+    if !output.status.success() {
+        bail!(
+            "{command:?} failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output)
+}
+
+fn path(path: &Path) -> Result<&str> {
+    path.to_str().context("test repository path is not UTF-8")
 }
 
 impl AppState {
