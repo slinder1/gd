@@ -1,0 +1,759 @@
+use anyhow::{Context, Result, bail};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::{OriginalUri, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::any,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{Arc, Mutex},
+};
+use tempfile::TempDir;
+use tokio::{
+    net::{TcpListener, UnixListener},
+    sync::oneshot,
+    task::JoinHandle,
+};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequest {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub base_ref_name: String,
+    pub head_ref_name: String,
+    pub is_draft: bool,
+    pub reviewers: Vec<String>,
+    pub comments: Vec<String>,
+    pub stack: Option<u64>,
+    pub stack_position: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Snapshot {
+    pub owner: String,
+    pub repository: String,
+    pub pull_requests: Vec<PullRequest>,
+    pub stacks: BTreeMap<u64, Vec<u64>>,
+}
+
+struct Model {
+    next_pr: u64,
+    next_stack: u64,
+    pull_requests: BTreeMap<u64, PullRequest>,
+    stacks: BTreeMap<u64, Vec<u64>>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    owner: String,
+    repository: String,
+    git_dir: PathBuf,
+    model: Arc<Mutex<Model>>,
+}
+
+impl AppState {
+    fn snapshot(&self) -> Snapshot {
+        let model = self.model.lock().unwrap();
+        Snapshot {
+            owner: self.owner.clone(),
+            repository: self.repository.clone(),
+            pull_requests: model.pull_requests.values().cloned().collect(),
+            stacks: model.stacks.clone(),
+        }
+    }
+}
+
+pub struct TestServer {
+    state: AppState,
+    address: std::net::SocketAddr,
+    socket: PathBuf,
+    config_dir: TempDir,
+    shutdown: Option<oneshot::Sender<()>>,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl TestServer {
+    pub async fn start(owner: &str, repository: &str, git_dir: impl Into<PathBuf>) -> Result<Self> {
+        validate_name("owner", owner)?;
+        validate_name("repository", repository)?;
+        let git_dir = git_dir.into();
+        if !git_dir.is_dir() {
+            bail!("git directory does not exist: {}", git_dir.display());
+        }
+        let git_dir = git_dir.canonicalize()?;
+
+        let config_dir = tempfile::tempdir()?;
+        let socket = config_dir.path().join("github.sock");
+        let state = AppState {
+            owner: owner.to_owned(),
+            repository: repository.to_owned(),
+            git_dir,
+            model: Arc::new(Mutex::new(Model {
+                next_pr: 1,
+                next_stack: 1,
+                pull_requests: BTreeMap::new(),
+                stacks: BTreeMap::new(),
+            })),
+        };
+        let app = Router::new()
+            .fallback(any(dispatch))
+            .with_state(state.clone());
+        let tcp = TcpListener::bind("127.0.0.1:0").await?;
+        let address = tcp.local_addr()?;
+        let unix = UnixListener::bind(&socket)?;
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let tcp_app = app.clone();
+        let tcp_task = tokio::spawn(async move {
+            let _ = axum::serve(tcp, tcp_app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        let unix_task = tokio::spawn(async move {
+            let _ = axum::serve(unix, app).await;
+        });
+
+        fs::write(
+            config_dir.path().join("config.yml"),
+            format!(
+                "http_unix_socket: {}\nprompt: disabled\nspinner: disabled\nhosts:\n  github.com:\n    user: {}\n    oauth_token: test-token\n    git_protocol: https\n",
+                socket.display(),
+                owner
+            ),
+        )?;
+
+        Ok(Self {
+            state,
+            address,
+            socket,
+            config_dir,
+            shutdown: Some(shutdown),
+            tasks: vec![tcp_task, unix_task],
+        })
+    }
+
+    pub fn apply_environment(&self, command: &mut Command) {
+        let source = format!(
+            "https://github.com/{}/{}",
+            self.state.owner, self.state.repository
+        );
+        let target = format!(
+            "http://{}/{}/{}",
+            self.address, self.state.owner, self.state.repository
+        );
+        command
+            .env("GH_CONFIG_DIR", self.config_dir.path())
+            .env("GH_TOKEN", "test-token")
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GH_SPINNER_DISABLED", "1")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", format!("url.{target}.insteadOf"))
+            .env("GIT_CONFIG_VALUE_0", source);
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.state.snapshot()
+    }
+
+    pub fn address(&self) -> std::net::SocketAddr {
+        self.address
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+fn validate_name(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.contains('/') {
+        bail!("{kind} must be one non-empty path component");
+    }
+    Ok(())
+}
+
+async fn dispatch(
+    State(state): State<AppState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match dispatch_inner(&state, method, uri.path(), uri.query(), &headers, &body).await {
+        Ok(response) => response,
+        Err((status, message)) => {
+            (status, json!({ "message": message }).to_string()).into_response()
+        }
+    }
+}
+
+type HttpResult = Result<Response, (StatusCode, String)>;
+
+async fn dispatch_inner(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResult {
+    if path == "/_test/state" && method == Method::GET {
+        return json_response(
+            StatusCode::OK,
+            &serde_json::to_value(state.snapshot()).unwrap(),
+        );
+    }
+    if path == "/graphql" && method == Method::POST {
+        return graphql(state, body);
+    }
+    let api_prefix = format!("/repos/{}/{}", state.owner, state.repository);
+    if let Some(rest) = path.strip_prefix(&api_prefix) {
+        return rest_api(state, method, rest, body);
+    }
+    let git_prefix = format!("/{}/{}", state.owner, state.repository);
+    if let Some(git_path) = path.strip_prefix(&git_prefix) {
+        return git_http(state, method, git_path, query, headers, body).await;
+    }
+    Err((
+        StatusCode::NOT_FOUND,
+        format!("unimplemented {method} {path}"),
+    ))
+}
+
+fn graphql(state: &AppState, body: &[u8]) -> HttpResult {
+    let request: Value = serde_json::from_slice(body).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid GraphQL request: {error}"),
+        )
+    })?;
+    let query = request.get("query").and_then(Value::as_str).unwrap_or("");
+    let variables = request
+        .get("variables")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    for key in ["owner"] {
+        if variables
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value != state.owner)
+        {
+            return Err((StatusCode::NOT_FOUND, "unknown repository owner".into()));
+        }
+    }
+    for key in ["name", "repo"] {
+        if variables
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value != state.repository)
+        {
+            return Err((StatusCode::NOT_FOUND, "unknown repository".into()));
+        }
+    }
+    if let Some(search) = variables.get("searchQuery").and_then(Value::as_str)
+        && !search.contains(&format!("repo:{}/{}", state.owner, state.repository))
+    {
+        return Err((StatusCode::NOT_FOUND, "unknown repository".into()));
+    }
+
+    if query.contains("__type(") || query.contains("__schema {") {
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { "__type": { "fields": [] } } }),
+        );
+    }
+    if query.contains("createPullRequest") {
+        let input = &variables["input"];
+        let mut model = state.model.lock().unwrap();
+        let number = model.next_pr;
+        model.next_pr += 1;
+        let pr = PullRequest {
+            number,
+            title: string(input, "title"),
+            body: string(input, "body"),
+            state: "OPEN".into(),
+            base_ref_name: string(input, "baseRefName"),
+            head_ref_name: string(input, "headRefName"),
+            is_draft: input.get("draft").and_then(Value::as_bool).unwrap_or(false),
+            reviewers: vec![],
+            comments: vec![],
+            stack: None,
+            stack_position: None,
+        };
+        model.pull_requests.insert(number, pr);
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { "createPullRequest": { "pullRequest": { "id": pr_id(number), "url": pr_url(state, number) } } } }),
+        );
+    }
+    if query.contains("updatePullRequest") {
+        let input = &variables["input"];
+        let number = id_number(input.get("pullRequestId"));
+        let mut model = state.model.lock().unwrap();
+        let pr = get_pr_mut(&mut model, number)?;
+        if let Some(value) = input.get("baseRefName").and_then(Value::as_str) {
+            pr.base_ref_name = value.into();
+        }
+        if let Some(value) = input.get("title").and_then(Value::as_str) {
+            pr.title = value.into();
+        }
+        if let Some(value) = input.get("body").and_then(Value::as_str) {
+            pr.body = value.into();
+        }
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { "updatePullRequest": { "__typename": "UpdatePullRequestPayload" } } }),
+        );
+    }
+    if query.contains("markPullRequestReadyForReview")
+        || query.contains("convertPullRequestToDraft")
+    {
+        let input = &variables["input"];
+        let number = id_number(input.get("pullRequestId"));
+        let mut model = state.model.lock().unwrap();
+        let pr = get_pr_mut(&mut model, number)?;
+        pr.is_draft = query.contains("convertPullRequestToDraft");
+        let field = if pr.is_draft {
+            "convertPullRequestToDraft"
+        } else {
+            "markPullRequestReadyForReview"
+        };
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { field: { "pullRequest": { "id": pr_id(number) } } } }),
+        );
+    }
+    if query.contains("addComment") {
+        let input = &variables["input"];
+        let number = id_number(input.get("subjectId"));
+        let mut model = state.model.lock().unwrap();
+        let pr = get_pr_mut(&mut model, number)?;
+        pr.comments.push(string(input, "body"));
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { "addComment": { "commentEdge": { "node": { "url": format!("{}#issuecomment-{}", pr_url(state, number), pr.comments.len()) } } } } }),
+        );
+    }
+    if query.contains("requestReviewsByLogin") || query.contains("requestReviews(") {
+        let input = &variables["input"];
+        let number = id_number(input.get("pullRequestId"));
+        let mut model = state.model.lock().unwrap();
+        let pr = get_pr_mut(&mut model, number)?;
+        for key in ["userLogins", "botLogins", "teamSlugs"] {
+            if let Some(values) = input.get(key).and_then(Value::as_array) {
+                pr.reviewers
+                    .extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+        let field = if query.contains("requestReviewsByLogin") {
+            "requestReviewsByLogin"
+        } else {
+            "requestReviews"
+        };
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { (field): { "clientMutationId": null } } }),
+        );
+    }
+    if query.contains("search(") {
+        let merged = variables
+            .get("searchQuery")
+            .and_then(Value::as_str)
+            .is_some_and(|q| q.contains("is:merged"));
+        let model = state.model.lock().unwrap();
+        let nodes: Vec<Value> = model
+            .pull_requests
+            .values()
+            .filter(|pr| (pr.state == "MERGED") == merged)
+            .map(|pr| pr_json(state, pr))
+            .collect();
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { "search": { "nodes": nodes, "pageInfo": { "hasNextPage": false, "endCursor": null } } } }),
+        );
+    }
+    if query.contains("query PullRequestProjectItems") {
+        return json_response(
+            StatusCode::OK,
+            &json!({ "data": { "repository": { "pullRequest": { "projectItems": { "totalCount": 0, "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } } } } } }),
+        );
+    }
+
+    let number = variables
+        .get("number")
+        .or_else(|| variables.get("pr_number"))
+        .or_else(|| variables.get("prNumber"))
+        .or_else(|| variables.get("pullRequestNumber"))
+        .and_then(Value::as_u64);
+    let model = state.model.lock().unwrap();
+    let pull_request = number
+        .and_then(|number| model.pull_requests.get(&number))
+        .map(|pr| pr_json(state, pr));
+    let nodes: Vec<Value> = model
+        .pull_requests
+        .values()
+        .filter(|pr| pr.state == "OPEN")
+        .map(|pr| pr_json(state, pr))
+        .collect();
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "data": {
+                "repository": repository_json(state, pull_request, nodes),
+                "viewer": { "login": state.owner }
+            }
+        }),
+    )
+}
+
+fn repository_json(state: &AppState, pull_request: Option<Value>, nodes: Vec<Value>) -> Value {
+    json!({
+        "id": "REPOSITORY_1",
+        "name": state.repository,
+        "nameWithOwner": format!("{}/{}", state.owner, state.repository),
+        "url": format!("https://github.com/{}/{}", state.owner, state.repository),
+        "isFork": false,
+        "viewerPermission": "ADMIN",
+        "viewerCanPush": true,
+        "viewerCanAdminister": true,
+        "hasIssuesEnabled": true,
+        "defaultBranchRef": { "name": "main" },
+        "owner": { "id": "USER_1", "login": state.owner },
+        "pullRequest": pull_request,
+        "pullRequests": { "nodes": nodes, "pageInfo": { "hasNextPage": false, "endCursor": null } },
+        "assignableUsers": { "nodes": [], "totalCount": 0 },
+        "labels": { "nodes": [] },
+        "milestones": { "nodes": [] }
+    })
+}
+
+fn pr_json(state: &AppState, pr: &PullRequest) -> Value {
+    json!({
+        "id": pr_id(pr.number),
+        "number": pr.number,
+        "title": pr.title,
+        "body": pr.body,
+        "state": pr.state,
+        "closed": pr.state != "OPEN",
+        "url": pr_url(state, pr.number),
+        "baseRefName": pr.base_ref_name,
+        "headRefName": pr.head_ref_name,
+        "isDraft": pr.is_draft,
+        "author": { "id": "USER_1", "login": state.owner },
+        "reviewRequests": { "nodes": [] },
+        "assignees": { "nodes": [] },
+        "assignedActors": { "nodes": [] },
+        "labels": { "nodes": [] },
+        "projectCards": { "nodes": [] },
+        "projectItems": { "nodes": [] },
+        "milestone": null,
+        "comments": { "nodes": [] },
+        "stack": pr.stack.map(|number| json!({ "number": number })),
+        "stackEntry": pr.stack_position.map(|position| json!({ "position": position }))
+    })
+}
+
+fn rest_api(state: &AppState, method: Method, path: &str, body: &[u8]) -> HttpResult {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.as_slice() == ["stacks"] && method == Method::POST {
+        let numbers = pull_request_numbers(body)?;
+        let mut model = state.model.lock().unwrap();
+        let stack = model.next_stack;
+        model.next_stack += 1;
+        assign_stack(&mut model, stack, &numbers);
+        return json_response(StatusCode::CREATED, &json!({ "number": stack }));
+    }
+    if let ["stacks", stack] = parts.as_slice() {
+        let stack = parse_number(stack)?;
+        if method == Method::GET {
+            let model = state.model.lock().unwrap();
+            let numbers = model
+                .stacks
+                .get(&stack)
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown stack".into()))?;
+            let prs: Vec<Value> = numbers.iter().map(|number| json!({ "number": number, "merged_at": model.pull_requests.get(number).filter(|pr| pr.state == "MERGED").map(|_| "merged") })).collect();
+            return json_response(StatusCode::OK, &json!({ "pull_requests": prs }));
+        }
+    }
+    if let ["stacks", stack, operation] = parts.as_slice() {
+        let stack = parse_number(stack)?;
+        if method == Method::POST && *operation == "add" {
+            let additions = pull_request_numbers(body)?;
+            let mut model = state.model.lock().unwrap();
+            let mut numbers = model
+                .stacks
+                .get(&stack)
+                .cloned()
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown stack".into()))?;
+            numbers.extend(additions);
+            assign_stack(&mut model, stack, &numbers);
+            return json_response(StatusCode::OK, &json!({}));
+        }
+        if method == Method::POST && *operation == "unstack" {
+            let mut model = state.model.lock().unwrap();
+            let numbers = model
+                .stacks
+                .remove(&stack)
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown stack".into()))?;
+            for number in numbers {
+                if let Some(pr) = model.pull_requests.get_mut(&number) {
+                    pr.stack = None;
+                    pr.stack_position = None;
+                }
+            }
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    }
+    if let ["issues", number, "comments"] = parts.as_slice() {
+        let number = parse_number(number)?;
+        if method == Method::POST {
+            let request: Value = serde_json::from_slice(body).map_err(bad_json)?;
+            let mut model = state.model.lock().unwrap();
+            let pr = get_pr_mut(&mut model, number)?;
+            pr.comments.push(string(&request, "body"));
+            return json_response(
+                StatusCode::CREATED,
+                &json!({ "id": pr.comments.len(), "html_url": format!("{}#issuecomment-{}", pr_url(state, number), pr.comments.len()) }),
+            );
+        }
+    }
+    if let ["pulls", number, "requested_reviewers"] = parts.as_slice() {
+        let number = parse_number(number)?;
+        let request: Value = serde_json::from_slice(body).map_err(bad_json)?;
+        let mut model = state.model.lock().unwrap();
+        let pr = get_pr_mut(&mut model, number)?;
+        for key in ["reviewers", "team_reviewers"] {
+            if let Some(values) = request.get(key).and_then(Value::as_array) {
+                pr.reviewers
+                    .extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+        return json_response(StatusCode::CREATED, &pr_json(state, pr));
+    }
+    Err((
+        StatusCode::NOT_FOUND,
+        format!("unimplemented REST {method} {path}"),
+    ))
+}
+
+fn assign_stack(model: &mut Model, stack: u64, numbers: &[u64]) {
+    model.stacks.insert(stack, numbers.to_vec());
+    for (position, number) in numbers.iter().enumerate() {
+        if let Some(pr) = model.pull_requests.get_mut(number) {
+            pr.stack = Some(stack);
+            pr.stack_position = Some(position);
+        }
+    }
+}
+
+async fn git_http(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    query: Option<&str>,
+    _headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResult {
+    let path = path.strip_prefix(".git").unwrap_or(path);
+    let (service, advertise) = match (method, path, query) {
+        (Method::GET, "/info/refs", Some("service=git-upload-pack")) => ("git-upload-pack", true),
+        (Method::GET, "/info/refs", Some("service=git-receive-pack")) => ("git-receive-pack", true),
+        (Method::POST, "/git-upload-pack", _) => ("git-upload-pack", false),
+        (Method::POST, "/git-receive-pack", _) => ("git-receive-pack", false),
+        _ => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("unimplemented git request {path}"),
+            ));
+        }
+    };
+    let git_dir = state.git_dir.clone();
+    let input = body.to_vec();
+    let service_owned = service.to_owned();
+    let output = tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
+        let mut command = Command::new("git");
+        command
+            .arg(service_owned.strip_prefix("git-").unwrap())
+            .arg("--stateless-rpc");
+        if advertise {
+            command.arg("--advertise-refs");
+        }
+        command
+            .arg(git_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        if !input.is_empty() {
+            child.stdin.take().unwrap().write_all(&input)?;
+        }
+        Ok(child.wait_with_output()?)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    if !output.status.success() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    if advertise {
+        let announcement = format!("# service={service}\n");
+        bytes.extend(format!("{:04x}{announcement}", announcement.len() + 4).as_bytes());
+        bytes.extend(b"0000");
+    }
+    bytes.extend(output.stdout);
+    let mut response = (StatusCode::OK, bytes).into_response();
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_str(&format!(
+            "application/x-{service}-{}",
+            if advertise { "advertisement" } else { "result" }
+        ))
+        .unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+fn json_response(status: StatusCode, value: &Value) -> HttpResult {
+    let mut response = (status, value.to_string()).into_response();
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    Ok(response)
+}
+
+fn string(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn id_number(value: Option<&Value>) -> u64 {
+    value
+        .and_then(Value::as_str)
+        .and_then(|id| id.strip_prefix("PR_"))
+        .and_then(|number| number.parse().ok())
+        .unwrap_or(0)
+}
+
+fn pr_id(number: u64) -> String {
+    format!("PR_{number}")
+}
+
+fn pr_url(state: &AppState, number: u64) -> String {
+    format!(
+        "https://github.com/{}/{}/pull/{number}",
+        state.owner, state.repository
+    )
+}
+
+fn get_pr_mut(model: &mut Model, number: u64) -> Result<&mut PullRequest, (StatusCode, String)> {
+    model.pull_requests.get_mut(&number).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("unknown pull request {number}"),
+        )
+    })
+}
+
+fn parse_number(value: &str) -> Result<u64, (StatusCode, String)> {
+    value
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, format!("invalid number {value}")))
+}
+
+fn pull_request_numbers(body: &[u8]) -> Result<Vec<u64>, (StatusCode, String)> {
+    let value: Value = serde_json::from_slice(body).map_err(bad_json)?;
+    value
+        .get("pull_requests")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_u64).collect())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing pull_requests".into()))
+}
+
+fn bad_json(error: serde_json::Error) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, format!("invalid JSON: {error}"))
+}
+
+fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+}
+
+pub async fn serve(
+    owner: String,
+    repository: String,
+    git_dir: PathBuf,
+    listen: &str,
+    socket: &Path,
+) -> Result<()> {
+    validate_name("owner", &owner)?;
+    validate_name("repository", &repository)?;
+    if !git_dir.is_dir() {
+        bail!("git directory does not exist: {}", git_dir.display());
+    }
+    let state = AppState {
+        owner,
+        repository,
+        git_dir: git_dir.canonicalize()?,
+        model: Arc::new(Mutex::new(Model {
+            next_pr: 1,
+            next_stack: 1,
+            pull_requests: BTreeMap::new(),
+            stacks: BTreeMap::new(),
+        })),
+    };
+    if let Some(parent) = socket.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if socket.exists() {
+        fs::remove_file(socket)?;
+    }
+    let tcp = TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("could not listen on {listen}"))?;
+    let unix = UnixListener::bind(socket)
+        .with_context(|| format!("could not listen on {}", socket.display()))?;
+    println!(
+        "{{\"address\":\"{}\",\"socket\":\"{}\"}}",
+        tcp.local_addr()?,
+        socket.display()
+    );
+    let app = Router::new().fallback(any(dispatch)).with_state(state);
+    tokio::select! {
+        result = axum::serve(tcp, app.clone()) => result?,
+        result = axum::serve(unix, app) => result?,
+        _ = tokio::signal::ctrl_c() => {},
+    }
+    Ok(())
+}
