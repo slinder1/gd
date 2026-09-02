@@ -401,8 +401,9 @@ impl Pr {
         if changes.is_empty() {
             return Ok(());
         }
+        let code_block = markdown_code_block("diff", changes);
         let comment = format!(
-            "<details>\n<summary>🛠️ {summary} (click to expand):</summary>\n\n```diff\n{changes}\n```\n</details>"
+            "<details>\n<summary>🛠️ {summary} (click to expand):</summary>\n\n{code_block}\n</details>"
         );
         let mut body_arg = ArgInlineOrFile::new("body");
         let mut cmd = gh();
@@ -493,6 +494,16 @@ impl Pr {
     pub fn get_url(&self) -> Result<String> {
         Ok(format!("{}/pull/{}", build_repo_url()?, self.number))
     }
+}
+
+fn markdown_code_block(language: &str, contents: &str) -> String {
+    let longest_run = contents
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(3.max(longest_run + 1));
+    format!("{fence}{language}\n{contents}\n{fence}")
 }
 
 const PR_GQL_QUERY: &str = "\
@@ -666,4 +677,17 @@ pub fn prs_by_change_id<'a>(
         by_id.insert(id.to_owned(), pr);
     }
     Ok(by_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::markdown_code_block;
+
+    #[test]
+    fn code_fence_is_longer_than_backtick_runs_in_its_contents() {
+        assert_eq!(
+            markdown_code_block("diff", "+before\n```\n+after"),
+            "````diff\n+before\n```\n+after\n````"
+        );
+    }
 }
