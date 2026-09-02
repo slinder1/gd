@@ -96,6 +96,81 @@ async fn extends_a_stack_when_a_second_change_is_pushed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn extends_a_stack_with_two_changes_in_one_push() {
+    let harness = TestHarness::start("alice", "widgets").await.unwrap();
+    harness.write("first", "first\n").unwrap();
+    harness.git(["add", "first"]).unwrap();
+    harness
+        .git([
+            "commit",
+            "-m",
+            "First change",
+            "-m",
+            "First body",
+            "-m",
+            "Change-Id: I0001",
+        ])
+        .unwrap();
+
+    push(&harness);
+
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot.stacks, [(1, vec![1])].into());
+    assert_eq!(snapshot.pull_requests.len(), 1);
+
+    harness.write("second", "second\n").unwrap();
+    harness.git(["add", "second"]).unwrap();
+    harness
+        .git([
+            "commit",
+            "-m",
+            "Second change",
+            "-m",
+            "Second body",
+            "-m",
+            "Change-Id: I0002",
+        ])
+        .unwrap();
+    harness.write("third", "third\n").unwrap();
+    harness.git(["add", "third"]).unwrap();
+    harness
+        .git([
+            "commit",
+            "-m",
+            "Third change",
+            "-m",
+            "Third body",
+            "-m",
+            "Change-Id: I0003",
+        ])
+        .unwrap();
+
+    push(&harness);
+
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot.stacks, [(1, vec![1, 3, 2])].into());
+    assert_eq!(snapshot.pull_requests.len(), 3);
+    let first = &snapshot.pull_requests[0];
+    assert_eq!(first.title, "First change");
+    assert_eq!(first.body, "First body\n\nChange-Id: I0001");
+    assert_eq!(first.base_ref_name, "main");
+    assert_eq!(first.comments, [initial_comment("first", "first")]);
+    assert_eq!(first.stack_position, Some(0));
+    let third = &snapshot.pull_requests[1];
+    assert_eq!(third.title, "Third change");
+    assert_eq!(third.body, "Third body\n\nChange-Id: I0003");
+    assert_eq!(third.base_ref_name, "users/alice/I0002");
+    assert_eq!(third.comments, [initial_comment("third", "third")]);
+    assert_eq!(third.stack_position, Some(2));
+    let second = &snapshot.pull_requests[2];
+    assert_eq!(second.title, "Second change");
+    assert_eq!(second.body, "Second body\n\nChange-Id: I0002");
+    assert_eq!(second.base_ref_name, "users/alice/I0001");
+    assert_eq!(second.comments, [initial_comment("second", "second")]);
+    assert_eq!(second.stack_position, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pushes_a_new_change_through_real_clients() {
     let harness = TestHarness::start("alice", "widgets").await.unwrap();
     harness.write("feature", "content\n").unwrap();
