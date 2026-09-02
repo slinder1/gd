@@ -9,6 +9,8 @@ use git2::{Oid, Repository};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::process::Command;
 
+const SYNTHETIC_COMMIT_MESSAGE: &str = "synthetic-praddle-commit";
+
 pub struct RemoteRefs {
     refs: HashMap<String, Oid>,
 }
@@ -261,14 +263,11 @@ fn plan_commit(
     if !parent_is_ancestor {
         parents.push(&parent_commit);
     }
-    let message = source
-        .message()
-        .with_context(|| format!("commit {} message is not UTF-8", source.id()))?;
     repo.commit(
         None,
         &source.author(),
         &source.committer(),
-        message,
+        SYNTHETIC_COMMIT_MESSAGE,
         &desired_tree,
         &parents,
     )

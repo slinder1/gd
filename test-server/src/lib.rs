@@ -186,6 +186,19 @@ impl TestRepository {
             .collect())
     }
 
+    pub fn commit_message(&self, commit: &str) -> Result<String> {
+        let mut command = self.remote_git();
+        command.args([
+            "show",
+            "--no-patch",
+            "--format=%B",
+            "--end-of-options",
+            commit,
+        ]);
+        let output = checked_output(&mut command)?;
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    }
+
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         let mut command = self.remote_git();
         command.args([
@@ -276,6 +289,10 @@ impl TestHarness {
 
     pub fn commit_parent_oids(&self, commit: &str) -> Result<Vec<String>> {
         self.repository.commit_parent_oids(commit)
+    }
+
+    pub fn commit_message(&self, commit: &str) -> Result<String> {
+        self.repository.commit_message(commit)
     }
 
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
