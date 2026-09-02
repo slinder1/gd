@@ -1,4 +1,5 @@
 use praddle_test_server::TestHarness;
+use std::process::Output;
 
 const INITIAL_COMMENT_PREFIX: &str =
     "<details>\n<summary>🛠️ Initial changes (click to expand):</summary>\n\n```diff\n";
@@ -16,7 +17,7 @@ fn interdiff_comment(path: &str, before: &str, after: &str) -> String {
     )
 }
 
-fn push(harness: &TestHarness) {
+fn push_output(harness: &TestHarness) -> Output {
     let mut command = harness.command(env!("CARGO_BIN_EXE_praddle"));
     command.args([
         "--remote=origin",
@@ -25,7 +26,11 @@ fn push(harness: &TestHarness) {
         "--serial",
         "push",
     ]);
-    let output = command.output().unwrap();
+    command.output().unwrap()
+}
+
+fn push(harness: &TestHarness) {
+    let output = push_output(harness);
     assert!(
         output.status.success(),
         "praddle failed\nstdout:\n{}\nstderr:\n{}",
@@ -290,6 +295,81 @@ async fn leaves_an_unchanged_stack_alone() {
             .unwrap(),
         second_tip
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_remote_refs_when_pr_reconciliation_fails() {
+    let harness = TestHarness::start("alice", "widgets").await.unwrap();
+    harness.write("change", "before\n").unwrap();
+    harness.git(["add", "change"]).unwrap();
+    harness
+        .git(["commit", "-m", "Change", "-m", "Change-Id: I0001"])
+        .unwrap();
+    push(&harness);
+    let old_head = harness
+        .remote_ref_oid("refs/heads/users/alice/I0001")
+        .unwrap()
+        .unwrap();
+
+    harness
+        .git(["push", "origin", "refs/heads/main:refs/heads/auxiliary"])
+        .unwrap();
+    let mut edit = harness.command("gh");
+    edit.args([
+        "pr",
+        "edit",
+        "1",
+        "--repo=https://github.com/alice/widgets",
+        "--base=auxiliary",
+    ]);
+    assert!(edit.output().unwrap().status.success());
+
+    harness.write("change", "after\n").unwrap();
+    harness.git(["add", "change"]).unwrap();
+    harness
+        .git([
+            "commit",
+            "--amend",
+            "-m",
+            "Change",
+            "-m",
+            "Change-Id: I0001",
+        ])
+        .unwrap();
+
+    let failed = push_output(&harness);
+    assert!(!failed.status.success());
+    assert_eq!(
+        harness
+            .remote_ref_oid("refs/heads/users/alice/I0001")
+            .unwrap(),
+        Some(old_head.clone())
+    );
+
+    let mut unstack = harness.command("gh");
+    unstack.args([
+        "api",
+        "--method=POST",
+        "repos/alice/widgets/stacks/1/unstack",
+    ]);
+    assert!(unstack.output().unwrap().status.success());
+    push(&harness);
+
+    let new_head = harness
+        .remote_ref_oid("refs/heads/users/alice/I0001")
+        .unwrap()
+        .unwrap();
+    assert!(harness.is_ancestor(&old_head, &new_head).unwrap());
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot.pull_requests[0].base_ref_name, "main");
+    assert_eq!(
+        snapshot.pull_requests[0].comments,
+        [
+            initial_comment("change", "before"),
+            interdiff_comment("change", "before", "after"),
+        ]
+    );
+    assert_eq!(snapshot.stacks, [(2, vec![1])].into());
 }
 
 #[tokio::test(flavor = "multi_thread")]

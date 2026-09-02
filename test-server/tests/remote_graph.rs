@@ -33,7 +33,7 @@ async fn inspects_the_bare_remote_graph() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rejects_non_fast_forward_updates_and_deletions() {
+async fn rejects_divergent_updates_but_allows_inverse_fast_forwards() {
     let harness = TestHarness::start("alice", "widgets").await.unwrap();
     harness.write("feature", "initial\n").unwrap();
     harness.git(["add", "feature"]).unwrap();
@@ -59,14 +59,22 @@ async fn rejects_non_fast_forward_updates_and_deletions() {
         harness.remote_ref_oid("refs/heads/change").unwrap(),
         Some(change)
     );
-    assert!(
-        harness
-            .git(["push", "origin", ":refs/heads/change"])
-            .is_err()
+
+    harness
+        .git(["push", "--force", "origin", "main:refs/heads/change"])
+        .unwrap();
+    assert_eq!(
+        harness.remote_ref_oid("refs/heads/change").unwrap(),
+        harness.remote_ref_oid("refs/heads/main").unwrap()
     );
 
     harness
         .git(["push", "origin", "HEAD:refs/heads/new-branch"])
         .unwrap();
-    assert!(harness.remote_ref_exists("refs/heads/new-branch").unwrap());
+    assert!(
+        harness
+            .git(["push", "origin", ":refs/heads/new-branch"])
+            .is_ok()
+    );
+    assert!(!harness.remote_ref_exists("refs/heads/new-branch").unwrap());
 }

@@ -27,7 +27,14 @@ impl AnyChange {
     pub fn diff(&self, remote_refs: &RemoteRefs) -> Result<Diff> {
         Ok(match self {
             AnyChange::LocalChange(local_change) => Diff::InitialDiff(local_change.diff()?),
-            AnyChange::Change(change) => Diff::InterDiff(change.interdiff(remote_refs)?),
+            AnyChange::Change(change)
+                if remote_refs
+                    .get(&change.local_change.remote_branch_ref())
+                    .is_some() =>
+            {
+                Diff::InterDiff(change.interdiff(remote_refs)?)
+            }
+            AnyChange::Change(change) => Diff::InitialDiff(change.local_change.diff()?),
         })
     }
 }

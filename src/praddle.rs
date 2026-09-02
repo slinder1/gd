@@ -128,7 +128,7 @@ fn push(args: &cli::Push) -> Result<()> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    publication
+    let published_refs = publication
         .push()
         .context("could not publish local changes")?;
     let mut changes = any_changes
@@ -204,6 +204,7 @@ fn push(args: &cli::Push) -> Result<()> {
             .collect::<Result<Vec<_>>>()
             .context("could not mark prs as ready")?;
     }
+    published_refs.commit();
     Ok(())
 }
 

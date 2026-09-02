@@ -487,19 +487,24 @@ zero=0000000000000000000000000000000000000000
 while read old new ref
 do
     [ "$old" = "$zero" ] && continue
-    if [ "$new" = "$zero" ]; then
-        echo "deletion rejected: $ref" >&2
-        exit 1
-    fi
+    [ "$new" = "$zero" ] && continue
     case "$ref" in
         refs/heads/*)
             git merge-base --is-ancestor "$old" "$new"
             status=$?
+            if [ "$status" -eq 0 ]; then
+                continue
+            elif [ "$status" -ne 1 ]; then
+                echo "could not verify update: $ref" >&2
+                exit "$status"
+            fi
+            git merge-base --is-ancestor "$new" "$old"
+            status=$?
             if [ "$status" -eq 1 ]; then
-                echo "non-fast-forward update rejected: $ref" >&2
+                echo "divergent update rejected: $ref" >&2
                 exit 1
             elif [ "$status" -ne 0 ]; then
-                echo "could not verify update: $ref" >&2
+                echo "could not verify inverse update: $ref" >&2
                 exit "$status"
             fi
             ;;

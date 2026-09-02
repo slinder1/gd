@@ -101,6 +101,8 @@ pub enum Command {
     /// existing branch is advanced with a synthetic commit whose first parent is its old tip, so
     /// every update is a fast-forward. Each commit is matched to its existing PR or else a new PR
     /// is created for it. The PRs are stacked such that they reproduce the local branch sequence.
+    /// If a later PR operation fails, Praddle attempts to atomically restore the original remote
+    /// ref tips with force-with-lease before returning the error.
     ///
     /// Note: This command never modifies existing commits, local refs, the index, or the worktree.
     /// Synthetic commits are written without attaching local refs and then pushed to `$remote`.
