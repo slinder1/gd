@@ -3,12 +3,12 @@
 This crate implements the GitHub behavior used by Praddle. It serves:
 
 * GitHub GraphQL and REST requests over a Unix socket for the real `gh` CLI.
-* Smart Git HTTP fetches and atomic pushes over a loopback TCP socket for the real `git` CLI.
+* A bare repository for direct file-based fetches and atomic pushes by the real `git` CLI.
+* A `post-receive` hook that reports pushes over the Unix socket.
 * `GET /_test/state` for test assertions.
 
-After each successful receive-pack operation, the server marks every open pull
-request as merged when its head ref is reachable from its base ref, matching
-GitHub's behavior.
+After each push, the server marks every open pull request as merged when its
+head ref is reachable from its base ref, matching GitHub's behavior.
 
 Run it with a single repository identity and an existing bare Git repository:
 
@@ -16,10 +16,12 @@ Run it with a single repository identity and an existing bare Git repository:
 cargo run -p praddle-test-server -- OWNER REPO /path/to/repo.git --socket /tmp/praddle-github.sock
 ```
 
-The first stdout line contains the selected TCP address and Unix socket as JSON. Configure an isolated `gh` config with `http_unix_socket` set to the socket. Redirect Git without changing the repository URL with:
+The first stdout line contains the Unix socket as JSON. Configure an isolated
+`gh` config with `http_unix_socket` set to the socket. Redirect Git to the bare
+repository without changing the GitHub repository URL with:
 
 ```console
-git config --global url.http://ADDRESS/OWNER/REPO.insteadOf https://github.com/OWNER/REPO
+git config --global url.file:///path/to/repo.git.insteadOf https://github.com/OWNER/REPO
 ```
 
 Tests should prefer `TestHarness::start`. It creates a temporary bare remote and
