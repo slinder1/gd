@@ -4,6 +4,7 @@ This crate implements the GitHub behavior used by Praddle. It serves:
 
 * GitHub GraphQL and REST requests over a Unix socket for the real `gh` CLI.
 * A bare repository for direct file-based fetches and atomic pushes by the real `git` CLI.
+* A `pre-receive` hook that rejects branch deletions and non-fast-forward updates.
 * A `post-receive` hook that reports pushes over the Unix socket.
 * `GET /_test/state` for test assertions.
 

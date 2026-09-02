@@ -112,8 +112,15 @@ impl Env {
         self.mock_pr_ids.inc()
     }
 
-    pub fn remote(&self) -> &str {
-        &self.remote
+    pub fn remote_url(&self) -> Result<String> {
+        let remote = self
+            .repo()?
+            .find_remote(&self.remote)
+            .with_context(|| format!("remote not found: {}", self.remote))?;
+        remote
+            .url()
+            .map(str::to_owned)
+            .with_context(|| format!("remote has no url: {}", self.remote))
     }
 
     pub fn base_branch(&self) -> &str {

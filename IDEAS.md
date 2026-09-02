@@ -66,44 +66,25 @@ codebase: a unique change, identified by a string which is currently encoded
 as a "Commit-Id:" footer in commit messages and PR bodies. A change "has"
 local commit(s) and PR(s).
 
-# Just use even more branches
+# Fast-forward-only change branches
 
-(For simplicity I will assume all of the local changes already have associated PRs.)
+Each change has one remote branch. The bottom PR targets the configured base
+branch, and each later PR targets its parent's change branch.
 
-Each change has a unique remote branch for both the PR base and head (rather
-than chaining them such that the head of one PR is the base of another).
+On first publication, the branch tip has the local commit's tree and the
+published parent branch tip as its parent. On update, a synthetic commit has:
 
-When syncing the local series of changes to GitHub, for each change:
+* The previous tip of its own branch as its first parent.
+* The newly published parent branch tip as a second parent when it is not
+  already reachable from the previous tip.
+* The local commit's cumulative tree.
 
-* Add a new commit to the PR with the same tree as the new "logical base" of
-the change. The diff for this commit basically "undoes" the effects of the
-change itself while also carrying forward any diff from a rebase or
-rearrangement of commits. Call this commit A.
-* Add another new commit on top of commit A, with the same tree as the local
-commit for the change. The diff for this commit basically "redoes" the full
-effects of the change relative to commit A, as if the author was creating a new
-PR for the change. Call this commit B.
-* Fast-forward the unique base branch to commit A, and the unique head branch
-to commit B.
+This makes every existing branch update a fast-forward while preserving the
+same PR base/head relationship. A parent update propagates through every
+descendant, but an unchanged branch is not advanced when its tree and ancestry
+already match.
 
-This avoids any force-pushes while still reflecting fixups and rebases on the
-local patch series branch. I haven’t done extensive testing, but from some
-quick checks it seems like GitHub doesn’t lose track of the comments in this
-system like it does with a force-push.
-
-This does add a new issue, in that not even the first commit in the stack is
-based on main. You can’t just hit merge. The tool will have to manage the
-merge, and it likely can’t even do that directly because GitHub clears
-approvals when the base branch changes on a PR.
-
-The best idea I have for managing this would be to require a new PR be created
-after "real review" results in an approval. The new PR has a single commit with
-the same final tree as the approved stacked PR. A bot could even create the new
-PR or just verify that they are identical. The bot could also approve the new
-PR (because its tree was approved by a human), and close the stacked version
-once the proxy is merged.
-
-This all seems a bit convoluted, and requires the community to host a bot which
-it trusts to approve reviews, but it would have the nice side-effect of leaving
-the original stacked PRs alone, so all discussions on them are correctly
-maintained against the code as it was when they were made in perpetuity.
+The synthetic commits are written without changing local refs, the index, the
+worktree, or existing commits. Only one branch per Change-Id is published; no
+metadata, `orig`, or partial-stack staging refs are required. PR identity and
+stack state are reconstructed from GitHub using the Change-Id in each PR body.

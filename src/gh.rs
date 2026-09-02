@@ -21,6 +21,7 @@ pub struct Pr {
     pub body: String,
     pub state: PrState,
     pub base_ref_name: String,
+    pub head_ref_name: String,
     #[serde(rename = "isDraft")]
     pub draft: bool,
     pub stack: Option<PrStack>,
@@ -88,15 +89,9 @@ impl ArgInlineOrFile {
 // FIXME: this pseudo-parsing seems wrong, but just getting it working for me first
 fn build_repo_url() -> Result<String> {
     let env = env::get();
-    let remote = env
-        .repo()?
-        .find_remote(env.remote())
-        .with_context(|| format!("remote not found: {}", env.remote()))?;
-    let url = remote
-        .url()
-        .with_context(|| format!("remote has no url: {}", env.remote()))?;
+    let url = env.remote_url()?;
     Ok(if url.starts_with("https://") {
-        url.into()
+        url
     } else if let Some(git_path) = url.strip_prefix("git@github.com:") {
         format!(
             "https://github.com/{}",
@@ -309,7 +304,7 @@ where
 }
 
 impl Pr {
-    pub fn mock(title: &str, body: &str, base: &str) -> Self {
+    pub fn mock(title: &str, body: &str, base: &str, head: &str) -> Self {
         let env = env::get();
         Self {
             number: env.next_mock_pr_id() as u64,
@@ -317,6 +312,7 @@ impl Pr {
             body: body.to_owned(),
             state: PrState::Open,
             base_ref_name: base.to_owned(),
+            head_ref_name: head.to_owned(),
             draft: true,
             stack: None,
             stack_entry: None,
@@ -466,7 +462,7 @@ impl Pr {
         cmd.args(args);
         let output = if env::get().dry_run() {
             print_cmd_and_files(&cmd, body_arg.file.iter())?;
-            let mock_pr = Pr::mock(title, body, base);
+            let mock_pr = Pr::mock(title, body, base, &remote_branch_ref);
             eprintln!("mock-pr-for-change-{}: {}", local_change.id, mock_pr.number);
             return Ok(mock_pr);
         } else {
@@ -484,6 +480,7 @@ impl Pr {
                     body: body.into(),
                     state: PrState::Open,
                     base_ref_name: base.into(),
+                    head_ref_name: remote_branch_ref,
                     draft: true,
                     stack: None,
                     stack_entry: None,
@@ -503,7 +500,7 @@ query($searchQuery: String!, $limit: Int!, $endCursor: String) { \
 search(query: $searchQuery, type: ISSUE, first: $limit, after: $endCursor) { \
 nodes { \
     ... on PullRequest { \
-        number title body state baseRefName isDraft \
+        number title body state baseRefName headRefName isDraft \
         stack { number } \
         stackEntry { position } \
     } \
@@ -516,7 +513,7 @@ fn prs() -> Result<Vec<Pr>> {
     let (owner, name) = repo_name()?;
     let search_queries = [
         format!("repo:{owner}/{name} is:pr author:@me state:open"),
-        format!("repo:{owner}/{name} is:pr author:@me is:merged"),
+        format!("repo:{owner}/{name} is:pr author:@me state:closed"),
     ];
     let search_results: Vec<Vec<Pr>> = search_queries
         .par_iter()
@@ -638,20 +635,33 @@ pub fn remove_stack(prs: &[&Pr]) -> Result<()> {
     Ok(())
 }
 
-pub fn prs_by_change_id() -> Result<HashMap<String, Pr>> {
-    let mut by_id = HashMap::new();
+pub fn prs_by_change_id<'a>(
+    change_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<HashMap<String, Pr>> {
+    let requested_change_ids: HashSet<&str> = change_ids.into_iter().collect();
+    let mut by_id: HashMap<String, Pr> = HashMap::new();
     for pr in prs()? {
         let trailers =
             message_trailers_strs(pr.message().as_ref()).context("message_trailers_strs failed")?;
-        let mut change_ids = trailers
+        let mut pr_change_ids = trailers
             .iter()
             .filter_map(|(k, v)| if k == "Change-Id" { Some(v) } else { None });
-        let id = match change_ids.next() {
+        let id = match pr_change_ids.next() {
             Some(id) => id,
             None => continue,
         };
-        if change_ids.next().is_some() {
+        if !requested_change_ids.contains(id) {
+            continue;
+        }
+        if pr_change_ids.next().is_some() {
             bail!("pr has multiple Change-Id: {pr:?}");
+        }
+        if let Some(other) = by_id.get(id) {
+            bail!(
+                "multiple prs have Change-Id {id}: {} and {}",
+                other.number,
+                pr.number
+            );
         }
         by_id.insert(id.to_owned(), pr);
     }
