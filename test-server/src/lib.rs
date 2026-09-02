@@ -29,6 +29,7 @@ pub struct PullRequest {
     pub body: String,
     pub state: String,
     pub base_ref_name: String,
+    pub base_ref_history: Vec<String>,
     pub head_ref_name: String,
     pub is_draft: bool,
     pub reviewers: Vec<String>,
@@ -594,6 +595,7 @@ fn graphql(state: &AppState, body: &[u8]) -> HttpResult {
             body: string(input, "body"),
             state: "OPEN".into(),
             base_ref_name: string(input, "baseRefName"),
+            base_ref_history: vec![string(input, "baseRefName")],
             head_ref_name: string(input, "headRefName"),
             is_draft: input.get("draft").and_then(Value::as_bool).unwrap_or(false),
             reviewers: vec![],
@@ -614,6 +616,7 @@ fn graphql(state: &AppState, body: &[u8]) -> HttpResult {
         let pr = get_pr_mut(&mut model, number)?;
         if let Some(value) = input.get("baseRefName").and_then(Value::as_str) {
             pr.base_ref_name = value.into();
+            pr.base_ref_history.push(value.into());
         }
         if let Some(value) = input.get("title").and_then(Value::as_str) {
             pr.title = value.into();
@@ -872,7 +875,7 @@ fn assign_stack(model: &mut Model, stack: u64, numbers: &[u64]) {
     for (position, number) in numbers.iter().enumerate() {
         if let Some(pr) = model.pull_requests.get_mut(number) {
             pr.stack = Some(stack);
-            pr.stack_position = Some(position);
+            pr.stack_position = Some(position + 1);
         }
     }
 }
