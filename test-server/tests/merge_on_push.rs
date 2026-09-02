@@ -32,11 +32,9 @@ async fn marks_a_pull_request_merged_when_its_head_is_reachable_from_its_base() 
 
     harness.write("feature", "updated\n").unwrap();
     harness.git(["add", "feature"]).unwrap();
+    harness.git(["commit", "-m", "Update feature"]).unwrap();
     harness
-        .git(["commit", "--amend", "-m", "Update feature"])
-        .unwrap();
-    harness
-        .git(["push", "--force", "origin", "HEAD:refs/heads/change"])
+        .git(["push", "origin", "HEAD:refs/heads/change"])
         .unwrap();
     assert_eq!(harness.snapshot().pull_requests[0].state, "OPEN");
 
