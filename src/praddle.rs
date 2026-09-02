@@ -1,10 +1,11 @@
 // Copyright © 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-use crate::change::{self, AnyChange, Change, LocalChange};
+use crate::change::{self, AnyChange, Change};
 use crate::cli;
 use crate::env;
 use crate::gh::{self, Pr, PrState};
+use crate::publication::{PublicationPlan, RemoteRefs};
 use crate::util::Extract;
 use anyhow::{Context, Result, bail};
 use git2::Repository;
@@ -51,15 +52,17 @@ fn push(args: &cli::Push) -> Result<()> {
     if local_changes.is_empty() {
         bail!("no local changes");
     }
-    let mut prs_by_change_id = gh::prs_by_change_id().context("could not enumerate remote prs")?;
+    let mut prs_by_change_id =
+        gh::prs_by_change_id(local_changes.iter().map(|change| change.id.as_str()))
+            .context("could not enumerate remote prs")?;
     let mut any_changes = vec![];
     for local_change in local_changes {
         any_changes.push(match prs_by_change_id.remove(&local_change.id) {
             None => AnyChange::LocalChange(local_change),
             Some(pr) => {
-                if pr.in_state(PrState::Merged) {
+                if !pr.in_state(PrState::Open) {
                     bail!(
-                        "pr {} for unmerged change {} is already merged",
+                        "pr {} for local change {} is not open",
                         pr.number,
                         local_change.id
                     );
@@ -68,6 +71,14 @@ fn push(args: &cli::Push) -> Result<()> {
             }
         });
     }
+    let remote_refs = RemoteRefs::fetch(&any_changes).context("could not fetch remote state")?;
+    let diffs = any_changes
+        .par_iter()
+        .map(|change| change.diff(&remote_refs))
+        .collect::<Result<Vec<_>>>()
+        .context("could not build diffs")?;
+    let publication = PublicationPlan::build(&any_changes, &remote_refs)
+        .context("could not plan branch updates")?;
     let has_cycles = detect_cycles(&any_changes);
     if has_cycles {
         let stacked_prs: Vec<&Pr> = any_changes
@@ -112,21 +123,9 @@ fn push(args: &cli::Push) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
     }
-    LocalChange::fetch_all(any_changes.iter().filter_map(|ac| match ac {
-        AnyChange::Change(c) => Some(&c.local_change),
-        _ => None,
-    }))
-    .context("could not fetch base branches for all existing prs")?;
-    let diffs = any_changes
-        .par_iter()
-        .map(|ac| ac.diff())
-        .collect::<Result<Vec<_>>>()
-        .context("could not build diffs")?;
-    LocalChange::push_all(any_changes.iter().map(|ac| ac.local_change()))
-        .context("could not push all local changes")?;
-    // FIXME: Should try to restore the original branch contents if we fail from this point on. It
-    // would be at least an attempt at being "atomic" about the push, and it would mean we don't
-    // lose the interdiff in a future re-run.
+    publication
+        .push()
+        .context("could not publish local changes")?;
     let mut changes = any_changes
         .into_par_iter()
         .map(|any_change| {
@@ -232,7 +231,9 @@ fn detect_cycles(any_changes: &[AnyChange]) -> bool {
 fn url(_args: &cli::Url) -> Result<()> {
     let local_changes =
         change::get_local_changes().context("could not enumerate current local branch")?;
-    let mut prs_by_change_id = gh::prs_by_change_id().context("could not enumerate remote prs")?;
+    let mut prs_by_change_id =
+        gh::prs_by_change_id(local_changes.iter().map(|change| change.id.as_str()))
+            .context("could not enumerate remote prs")?;
     for local_change in local_changes {
         if let Some(pr) = prs_by_change_id.remove(&local_change.id) {
             println!("{}", pr.get_url()?);

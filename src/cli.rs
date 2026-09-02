@@ -13,15 +13,14 @@ fn parse_verbosity(value: &str) -> Result<u8, String> {
 ///
 /// Main features:
 ///
-/// * Never touches your local branches. The tool only reads from your local branch and attempts to
-///   mirror it to GitHub by: fetching remote tracking branches, force-pushing namespaced refs,
-///   creating PRs and comments with the official GitHub UI.
+/// * Never touches your local refs, index, worktree, or existing commits. The tool reads the local
+///   branch, writes synthetic commits without attaching refs, fast-forwards namespaced remote refs,
+///   and creates PRs and comments with the official GitHub UI.
 /// * Treats one branch as one patch-stack, where each commit maps 1:1 to a PR.
 /// * Uses the same "Change-Id" trailer used by Gerrit. You can install the commit-msg hook from
 ///   a Gerrit instance or use the install-hook subcommand to install an embedded copy.
 /// * Generates "interdiff"-esque diffs for updates to changes and posts them as a comment on your
-///   behalf when you push. This is a bit of a workaround to mitigate the fallout from having to
-///   force-push.
+///   behalf when you push.
 /// * Quiet by default. No news is good news, but you can also get verbose output or a dry-run.
 /// * Uses the official `gh` tool to interface with the GitHub API, so you don't have
 ///   to go through authenticating another app.
@@ -35,12 +34,6 @@ fn parse_verbosity(value: &str) -> Result<u8, String> {
 ///
 /// And currently its greatest shortcomings are:
 ///
-/// * Does not even try to avoid force pushes. Review comments will regularly end up marked as
-///   stale with no relation to the latest patch contents. This seems to happen frequently anyway,
-///   and avoiding it in the general case requires never rebasing which is not viable for anything
-///   but an extremely short-lived review process. Ideas about how to potentially resolve this is
-///   documented at https://github.com/slinder1/praddle/blob/main/IDEAS.md and contributions are
-///   welcome!
 /// * Currently lacks a lot of polish and documentation.
 ///
 /// It reads configuration from the first of the following:
@@ -103,14 +96,14 @@ pub struct Globals {
 pub enum Command {
     /// Push the current branch as a stack of GitHub PRs.
     ///
-    /// The commits `${base}..HEAD` must each have a `Change-Id:` trailer. Each commit will be
-    /// force-pushed to a corresponding branch named `${user_branch_prefix}${change_id}` on
-    /// `${remote}`. Each commit will be matched to its existing PR or else a new PR will be
-    /// created for it. The PRs will be "stacked" such that they reproduce the local branch
-    /// sequence.
+    /// The commits `${base}..HEAD` must each have a `Change-Id:` trailer. Each commit is projected
+    /// onto a corresponding branch named `${user_branch_prefix}${change_id}` on `${remote}`. An
+    /// existing branch is advanced with a synthetic commit whose first parent is its old tip, so
+    /// every update is a fast-forward. Each commit is matched to its existing PR or else a new PR
+    /// is created for it. The PRs are stacked such that they reproduce the local branch sequence.
     ///
-    /// Note: This command will never modify your commits or refs, even their messages. No local
-    /// branches are created or destroyed. All mutation occurs exclusively on the `$remote`.
+    /// Note: This command never modifies existing commits, local refs, the index, or the worktree.
+    /// Synthetic commits are written without attaching local refs and then pushed to `$remote`.
     #[command(visible_alias = "p")]
     Push(Push),
     /// Print the PR URL of the top-most (i.e. last) change which already has one.

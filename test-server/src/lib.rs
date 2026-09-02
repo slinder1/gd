@@ -10,7 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs,
     os::unix::fs::PermissionsExt,
@@ -123,11 +123,88 @@ impl TestRepository {
     }
 
     pub fn remote_ref_exists(&self, reference: &str) -> Result<bool> {
-        Ok(Command::new("git")
-            .args(["show-ref", "--verify", "--quiet", reference])
-            .current_dir(&self.git_dir)
-            .status()?
-            .success())
+        Ok(self.remote_ref_oid(reference)?.is_some())
+    }
+
+    pub fn remote_ref_oid(&self, reference: &str) -> Result<Option<String>> {
+        let mut command = self.remote_git();
+        command.args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            reference,
+        ]);
+        let output = command
+            .output()
+            .with_context(|| format!("could not execute {command:?}"))?;
+        match output.status.code() {
+            Some(0) => Ok(Some(oid_output(&output)?)),
+            Some(1) => Ok(None),
+            _ => {
+                checked_command_output(&command, output)?;
+                unreachable!()
+            }
+        }
+    }
+
+    pub fn remote_branch_refs(&self) -> Result<BTreeSet<String>> {
+        let mut command = self.remote_git();
+        command.args(["for-each-ref", "--format=%(refname)", "refs/heads"]);
+        let output = checked_output(&mut command)?;
+        Ok(String::from_utf8(output.stdout)?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    pub fn commit_tree_oid(&self, commit: &str) -> Result<String> {
+        let mut command = self.remote_git();
+        command.args([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{commit}^{{tree}}"),
+        ]);
+        oid_output(&checked_output(&mut command)?)
+    }
+
+    pub fn commit_parent_oids(&self, commit: &str) -> Result<Vec<String>> {
+        let mut command = self.remote_git();
+        command.args([
+            "show",
+            "--no-patch",
+            "--format=%P",
+            "--end-of-options",
+            commit,
+        ]);
+        let output = checked_output(&mut command)?;
+        Ok(String::from_utf8(output.stdout)?
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let mut command = self.remote_git();
+        command.args([
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            ancestor,
+            descendant,
+        ]);
+        let output = command
+            .output()
+            .with_context(|| format!("could not execute {command:?}"))?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                checked_command_output(&command, output)?;
+                unreachable!()
+            }
+        }
     }
 
     pub fn worktree(&self) -> &Path {
@@ -136,6 +213,12 @@ impl TestRepository {
 
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
+    }
+
+    fn remote_git(&self) -> Command {
+        let mut command = Command::new("git");
+        command.arg("--git-dir").arg(&self.git_dir);
+        command
     }
 }
 
@@ -178,6 +261,26 @@ impl TestHarness {
         self.repository.remote_ref_exists(reference)
     }
 
+    pub fn remote_ref_oid(&self, reference: &str) -> Result<Option<String>> {
+        self.repository.remote_ref_oid(reference)
+    }
+
+    pub fn remote_branch_refs(&self) -> Result<BTreeSet<String>> {
+        self.repository.remote_branch_refs()
+    }
+
+    pub fn commit_tree_oid(&self, commit: &str) -> Result<String> {
+        self.repository.commit_tree_oid(commit)
+    }
+
+    pub fn commit_parent_oids(&self, commit: &str) -> Result<Vec<String>> {
+        self.repository.commit_parent_oids(commit)
+    }
+
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        self.repository.is_ancestor(ancestor, descendant)
+    }
+
     pub fn worktree(&self) -> &Path {
         self.repository.worktree()
     }
@@ -205,6 +308,10 @@ fn checked_output(command: &mut Command) -> Result<Output> {
     let output = command
         .output()
         .with_context(|| format!("could not execute {command:?}"))?;
+    checked_command_output(command, output)
+}
+
+fn checked_command_output(command: &Command, output: Output) -> Result<Output> {
     if !output.status.success() {
         bail!(
             "{command:?} failed with {}\nstdout:\n{}\nstderr:\n{}",
@@ -214,6 +321,10 @@ fn checked_output(command: &mut Command) -> Result<Output> {
         );
     }
     Ok(output)
+}
+
+fn oid_output(output: &Output) -> Result<String> {
+    Ok(String::from_utf8(output.stdout.clone())?.trim().to_owned())
 }
 
 fn path(path: &Path) -> Result<&str> {
@@ -339,13 +450,47 @@ fn validate_name(kind: &str, value: &str) -> Result<()> {
 }
 
 fn install_push_hook(git_dir: &Path, socket: &Path) -> Result<()> {
-    let path = git_dir.join("hooks/post-receive");
+    let hooks = git_dir.join("hooks");
+    let pre_receive = hooks.join("pre-receive");
+    fs::write(&pre_receive, PRE_RECEIVE_HOOK)?;
+    make_executable(&pre_receive)?;
+
+    let post_receive = hooks.join("post-receive");
     let socket = path_arg(socket)?;
     let contents = format!(
         "#!/bin/sh\ncurl --silent --show-error --fail --unix-socket {socket} --request POST http://localhost/_test/push >/dev/null\n"
     );
-    fs::write(&path, contents)?;
-    let mut permissions = fs::metadata(&path)?.permissions();
+    fs::write(&post_receive, contents)?;
+    make_executable(&post_receive)
+}
+
+const PRE_RECEIVE_HOOK: &str = r#"#!/bin/sh
+zero=0000000000000000000000000000000000000000
+while read old new ref
+do
+    [ "$old" = "$zero" ] && continue
+    if [ "$new" = "$zero" ]; then
+        echo "deletion rejected: $ref" >&2
+        exit 1
+    fi
+    case "$ref" in
+        refs/heads/*)
+            git merge-base --is-ancestor "$old" "$new"
+            status=$?
+            if [ "$status" -eq 1 ]; then
+                echo "non-fast-forward update rejected: $ref" >&2
+                exit 1
+            elif [ "$status" -ne 0 ]; then
+                echo "could not verify update: $ref" >&2
+                exit "$status"
+            fi
+            ;;
+    esac
+done
+"#;
+
+fn make_executable(path: &Path) -> Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions)?;
     Ok(())
@@ -532,15 +677,25 @@ fn graphql(state: &AppState, body: &[u8]) -> HttpResult {
         );
     }
     if query.contains("search(") {
-        let merged = variables
+        let search = variables
             .get("searchQuery")
             .and_then(Value::as_str)
-            .is_some_and(|q| q.contains("is:merged"));
+            .unwrap_or_default();
         let model = state.model.lock().unwrap();
         let nodes: Vec<Value> = model
             .pull_requests
             .values()
-            .filter(|pr| (pr.state == "MERGED") == merged)
+            .filter(|pr| {
+                if search.contains("state:open") {
+                    pr.state == "OPEN"
+                } else if search.contains("state:closed") {
+                    pr.state != "OPEN"
+                } else if search.contains("is:merged") {
+                    pr.state == "MERGED"
+                } else {
+                    true
+                }
+            })
             .map(|pr| pr_json(state, pr))
             .collect();
         return json_response(
@@ -744,18 +899,24 @@ fn detect_merged(state: &AppState) -> Result<()> {
 
     let mut merged = Vec::new();
     for (number, head, base) in open_pull_requests {
-        let output = Command::new("git")
-            .args([
-                "--git-dir",
-                path(&state.git_dir)?,
-                "merge-base",
-                "--is-ancestor",
-                &head,
-                &base,
-            ])
-            .output()?;
-        if output.status.success() {
-            merged.push((number, head, base));
+        let mut command = Command::new("git");
+        command.args([
+            "--git-dir",
+            path(&state.git_dir)?,
+            "merge-base",
+            "--is-ancestor",
+            &head,
+            &base,
+        ]);
+        let output = command
+            .output()
+            .with_context(|| format!("could not execute {command:?}"))?;
+        match output.status.code() {
+            Some(0) => merged.push((number, head, base)),
+            Some(1) => {}
+            _ => {
+                checked_command_output(&command, output)?;
+            }
         }
     }
 

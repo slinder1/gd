@@ -6,6 +6,7 @@ mod cli;
 mod env;
 mod gh;
 mod praddle;
+mod publication;
 mod util;
 
 fn main() -> anyhow::Result<()> {

@@ -3,13 +3,13 @@
 
 use crate::env;
 use crate::gh::Pr;
-use crate::util::{exec, print_cmd_and_files};
+use crate::publication::{RemoteRefs, branch_ref};
 use anyhow::{Context, Result, bail};
 use git2::{
     Commit, DiffDelta, DiffFormat, DiffHunk, DiffLine, DiffOptions, FileFavor, MergeOptions, Oid,
     Tree, message_trailers_bytes,
 };
-use std::process::Command;
+use std::collections::HashSet;
 
 #[derive(Debug)]
 pub enum AnyChange {
@@ -24,10 +24,10 @@ impl AnyChange {
             AnyChange::Change(change) => &change.local_change,
         }
     }
-    pub fn diff(&self) -> Result<Diff> {
+    pub fn diff(&self, remote_refs: &RemoteRefs) -> Result<Diff> {
         Ok(match self {
             AnyChange::LocalChange(local_change) => Diff::InitialDiff(local_change.diff()?),
-            AnyChange::Change(change) => Diff::InterDiff(change.interdiff()?),
+            AnyChange::Change(change) => Diff::InterDiff(change.interdiff(remote_refs)?),
         })
     }
 }
@@ -76,62 +76,6 @@ impl LocalChange {
     pub fn remote_branch_ref(&self) -> String {
         format!("refs/heads/{}", self.remote_branch())
     }
-    pub fn push_refspec(&self) -> String {
-        let oid = self.oid;
-        let remote_branch_ref = self.remote_branch_ref();
-        format!("{oid}:{remote_branch_ref}")
-    }
-    pub fn push_all<'a, I: Iterator<Item = &'a Self>>(iterator: I) -> Result<()> {
-        let repo = env::get().repo()?;
-        let remote = env::get().remote();
-        let refspecs: Vec<String> = iterator
-            .filter_map(|lc| {
-                let remote_ref = format!("refs/remotes/{remote}/{}", lc.remote_branch());
-                let already_current = repo
-                    .find_reference(&remote_ref)
-                    .ok()
-                    .and_then(|reference| reference.target())
-                    == Some(lc.oid);
-                (!already_current).then(|| lc.push_refspec())
-            })
-            .collect();
-        if refspecs.is_empty() {
-            return Ok(());
-        }
-        let mut cmd = Command::new("git");
-        let mut args = vec![
-            "push".to_string(),
-            env::get().remote().into(),
-            "--force-with-lease".into(),
-            "--atomic".into(),
-        ];
-        args.extend(refspecs);
-        cmd.args(args);
-        if env::get().dry_run() {
-            print_cmd_and_files(&cmd, std::iter::empty())?;
-            return Ok(());
-        }
-        exec(&mut cmd)?;
-        Ok(())
-    }
-    pub fn fetch_all<'a, I: Iterator<Item = &'a Self>>(iterator: I) -> Result<()> {
-        let refspecs: Vec<String> = iterator
-            .map(|lc| format!("{}:", lc.remote_branch_ref()))
-            .collect();
-        if refspecs.is_empty() {
-            return Ok(());
-        }
-        let mut cmd = Command::new("git");
-        let mut args = vec!["fetch".to_string(), env::get().remote().into()];
-        args.extend(refspecs);
-        cmd.args(args);
-        if env::get().dry_run() {
-            print_cmd_and_files(&cmd, std::iter::empty())?;
-            return Ok(());
-        }
-        exec(&mut cmd)?;
-        Ok(())
-    }
     pub fn diff(&self) -> Result<String> {
         let change = self.id.as_str();
         let repo = env::get().repo()?;
@@ -164,23 +108,18 @@ pub struct Change {
 
 impl Change {
     /// Adapted from https://joshcannon.me/2025/04/05/pr-interdiff.html
-    pub fn interdiff(&self) -> Result<String> {
+    pub fn interdiff(&self, remote_refs: &RemoteRefs) -> Result<String> {
         let change = self.local_change.id.as_str();
         let repo = env::get().repo()?;
-        let remote_branch = format!(
-            "{}/{}",
-            env::get().remote(),
-            self.local_change.remote_branch()
-        );
+        let remote_branch = self.local_change.remote_branch_ref();
         let old_commit = repo
-            .revparse_single(remote_branch.as_ref())
-            .with_context(|| format!("could not parse revspec for remote branch: {remote_branch}"))?
-            .peel_to_commit()
-            .context("revspec for remote branch did not resolve to a commit")?;
+            .find_commit(remote_refs.require(&remote_branch)?)
+            .with_context(|| format!("remote branch is not a commit: {remote_branch}"))?;
         let new_commit = self.local_change.commit()?;
-        let old_merge_base = old_commit
-            .parent(0)
-            .with_context(|| format!("old version of change {change} has no parent commit"))?;
+        let old_base_ref = branch_ref(&self.pr.base_ref_name);
+        let old_merge_base = repo
+            .find_commit(remote_refs.require(&old_base_ref)?)
+            .with_context(|| format!("remote base is not a commit: {old_base_ref}"))?;
         let new_merge_base = new_commit
             .parent(0)
             .with_context(|| format!("new version of change {change} has no parent commit",))?;
@@ -224,9 +163,13 @@ pub fn get_local_changes() -> Result<Vec<LocalChange>> {
     revwalk.push_head()?;
     let base_branch_ref = env::get().base_branch_ref();
     revwalk.hide_ref(&base_branch_ref)?;
+    let mut seen_change_ids = HashSet::new();
     for oid in revwalk {
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
+        if commit.parent_count() != 1 {
+            bail!("change commit must have exactly one parent: {commit:?}");
+        }
         let trailers = message_trailers_bytes(
             commit
                 .message_raw()
@@ -246,6 +189,9 @@ pub fn get_local_changes() -> Result<Vec<LocalChange>> {
             .with_context(|| format!("commit Change-Id is not valid utf8: {commit:?}"))?;
         if change_ids.next().is_some() {
             bail!("commit has multiple Change-Id: {commit:?}");
+        }
+        if !seen_change_ids.insert(id.clone()) {
+            bail!("local branch has duplicate Change-Id: {id}");
         }
         local_changes.push(LocalChange { id, oid });
     }
