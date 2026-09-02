@@ -244,7 +244,7 @@ async fn updates_a_change_when_it_is_edited_and_pushed_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pushes_a_new_change_through_real_clients() {
+async fn misc() {
     let harness = TestHarness::start("alice", "widgets").await.unwrap();
     harness.write("feature", "content\n").unwrap();
     harness.git(["add", "feature"]).unwrap();
