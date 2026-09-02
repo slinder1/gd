@@ -363,6 +363,9 @@ impl Pr {
     }
 
     pub fn set_base(&mut self, base: &str) -> Result<()> {
+        if self.base_ref_name == base {
+            return Ok(());
+        }
         let mut cmd = gh();
         let args = self.args_for("edit", [format!("--base={base}")])?;
         cmd.args(args);
@@ -540,9 +543,12 @@ fn prs() -> Result<Vec<Pr>> {
     Ok(prs)
 }
 
-pub fn reconcile_stack(prs: &[&Pr]) -> Result<()> {
-    let (owner, name) = repo_name()?;
-    let desired: Vec<u64> = prs.iter().rev().map(|pr| pr.number).collect();
+struct ExistingStack {
+    number: u64,
+    pull_requests: Vec<u64>,
+}
+
+fn existing_stack(prs: &[&Pr]) -> Result<Option<ExistingStack>> {
     let stack_numbers: HashSet<u64> = prs
         .iter()
         .filter_map(|pr| pr.stack.as_ref().map(|stack| stack.number))
@@ -550,18 +556,11 @@ pub fn reconcile_stack(prs: &[&Pr]) -> Result<()> {
     if stack_numbers.len() > 1 {
         bail!("local prs belong to multiple GitHub stacks: {stack_numbers:?}");
     }
-
     let Some(stack_number) = stack_numbers.iter().next().copied() else {
-        rest_api_empty(
-            "POST",
-            format!("repos/{owner}/{name}/stacks"),
-            Some(&desired),
-        )?;
-        return Ok(());
+        return Ok(None);
     };
-    let endpoint = |suffix: &str| format!("repos/{owner}/{name}/stacks/{stack_number}{suffix}");
-
-    let stack = rest_stack(endpoint(""))?;
+    let (owner, name) = repo_name()?;
+    let stack = rest_stack(format!("repos/{owner}/{name}/stacks/{stack_number}"))?;
     let unmerged: Vec<u64> = stack
         .pull_requests
         .iter()
@@ -592,58 +591,73 @@ pub fn reconcile_stack(prs: &[&Pr]) -> Result<()> {
     if existing != unmerged {
         bail!("GraphQL and REST disagree about the order of GitHub stack {stack_number}");
     }
-
-    if desired.starts_with(&existing) {
-        let additions = &desired[existing.len()..];
-        if !additions.is_empty() {
-            rest_api_empty("POST", endpoint("/add"), Some(additions))?;
-        }
-    } else {
-        unstack(endpoint("/unstack"))?;
-        rest_api_empty(
-            "POST",
-            format!("repos/{owner}/{name}/stacks"),
-            Some(&desired),
-        )?;
-    }
-    Ok(())
+    Ok(Some(ExistingStack {
+        number: stack_number,
+        pull_requests: existing,
+    }))
 }
 
-pub fn remove_stack(prs: &[&Pr]) -> Result<()> {
-    let (owner, name) = repo_name()?;
-    let stack_numbers: HashSet<u64> = prs
-        .iter()
-        .filter_map(|pr| pr.stack.as_ref().map(|stack| stack.number))
-        .collect();
-    if stack_numbers.len() > 1 {
-        bail!("local prs belong to multiple GitHub stacks: {stack_numbers:?}");
-    }
-    let Some(stack_number) = stack_numbers.iter().next().copied() else {
-        return Ok(());
-    };
-    let endpoint = format!("repos/{owner}/{name}/stacks/{stack_number}");
-    let stack = rest_stack(endpoint.clone())?;
-    let unmerged: Vec<u64> = stack
-        .pull_requests
-        .iter()
-        .filter(|pr| pr.merged_at.is_none())
-        .map(|pr| pr.number)
-        .collect();
-    let local_count = prs
-        .iter()
-        .filter(|pr| {
-            pr.stack
-                .as_ref()
-                .is_some_and(|stack| stack.number == stack_number)
+pub struct StackPlan {
+    existing: Option<ExistingStack>,
+}
+
+impl StackPlan {
+    pub fn inspect(prs: &[&Pr]) -> Result<Self> {
+        Ok(Self {
+            existing: existing_stack(prs)?,
         })
-        .count();
-    if local_count != unmerged.len() {
-        bail!("GitHub stack {stack_number} contains unmerged prs outside the local stack");
     }
-    if !unmerged.is_empty() {
-        unstack(format!("{endpoint}/unstack"))?;
+
+    pub fn requires_unstack(&self, desired: &[(&Pr, &str)]) -> bool {
+        let Some(existing) = self.existing.as_ref() else {
+            return false;
+        };
+        let desired_order: Vec<u64> = desired.iter().rev().map(|(pr, _)| pr.number).collect();
+        desired_order != existing.pull_requests
+            || desired.iter().any(|(pr, base)| pr.base_ref_name != *base)
     }
-    Ok(())
+
+    pub fn unstack(&mut self) -> Result<()> {
+        let Some(existing) = self.existing.take() else {
+            return Ok(());
+        };
+        if !existing.pull_requests.is_empty() {
+            let (owner, name) = repo_name()?;
+            unstack(format!(
+                "repos/{owner}/{name}/stacks/{}/unstack",
+                existing.number
+            ))?;
+        }
+        Ok(())
+    }
+
+    pub fn reconcile(self, prs: &[&Pr]) -> Result<()> {
+        let (owner, name) = repo_name()?;
+        let desired: Vec<u64> = prs.iter().rev().map(|pr| pr.number).collect();
+        let Some(existing) = self.existing else {
+            return rest_api_empty(
+                "POST",
+                format!("repos/{owner}/{name}/stacks"),
+                Some(&desired),
+            );
+        };
+        let endpoint =
+            |suffix: &str| format!("repos/{owner}/{name}/stacks/{}{suffix}", existing.number);
+        if desired.starts_with(&existing.pull_requests) {
+            let additions = &desired[existing.pull_requests.len()..];
+            if !additions.is_empty() {
+                rest_api_empty("POST", endpoint("/add"), Some(additions))?;
+            }
+        } else {
+            unstack(endpoint("/unstack"))?;
+            rest_api_empty(
+                "POST",
+                format!("repos/{owner}/{name}/stacks"),
+                Some(&desired),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub fn prs_by_change_id<'a>(

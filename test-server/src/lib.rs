@@ -49,6 +49,7 @@ pub struct Snapshot {
 struct Model {
     next_pr: u64,
     next_stack: u64,
+    fail_next_base_update: bool,
     pull_requests: BTreeMap<u64, PullRequest>,
     stacks: BTreeMap<u64, Vec<u64>>,
 }
@@ -388,6 +389,7 @@ impl TestServer {
             model: Arc::new(Mutex::new(Model {
                 next_pr: 1,
                 next_stack: 1,
+                fail_next_base_update: false,
                 pull_requests: BTreeMap::new(),
                 stacks: BTreeMap::new(),
             })),
@@ -442,6 +444,10 @@ impl TestServer {
 
     pub fn snapshot(&self) -> Snapshot {
         self.state.snapshot()
+    }
+
+    pub fn fail_next_base_update(&self) {
+        self.state.model.lock().unwrap().fail_next_base_update = true;
     }
 
     pub fn socket(&self) -> &Path {
@@ -635,8 +641,18 @@ fn graphql(state: &AppState, body: &[u8]) -> HttpResult {
         let input = &variables["input"];
         let number = id_number(input.get("pullRequestId"));
         let mut model = state.model.lock().unwrap();
+        if input.get("baseRefName").is_some() && model.fail_next_base_update {
+            model.fail_next_base_update = false;
+            return Err((StatusCode::CONFLICT, "injected base update failure".into()));
+        }
         let pr = get_pr_mut(&mut model, number)?;
         if let Some(value) = input.get("baseRefName").and_then(Value::as_str) {
+            if pr.stack.is_some() && pr.base_ref_name != value {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "cannot retarget a pull request while it belongs to a stack".into(),
+                ));
+            }
             pr.base_ref_name = value.into();
             pr.base_ref_history.push(value.into());
         }
@@ -1051,6 +1067,7 @@ pub async fn serve(
         model: Arc::new(Mutex::new(Model {
             next_pr: 1,
             next_stack: 1,
+            fail_next_base_update: false,
             pull_requests: BTreeMap::new(),
             stacks: BTreeMap::new(),
         })),
