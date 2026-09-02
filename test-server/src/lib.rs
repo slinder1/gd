@@ -3,7 +3,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{OriginalUri, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
 };
@@ -13,17 +13,13 @@ use std::{
     collections::BTreeMap,
     ffi::OsStr,
     fs,
-    io::Write,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     sync::{Arc, Mutex},
 };
 use tempfile::TempDir;
-use tokio::{
-    net::{TcpListener, UnixListener},
-    sync::oneshot,
-    task::JoinHandle,
-};
+use tokio::{net::UnixListener, sync::oneshot, task::JoinHandle};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -238,7 +234,6 @@ impl AppState {
 
 pub struct TestServer {
     state: AppState,
-    address: std::net::SocketAddr,
     socket: PathBuf,
     config_dir: TempDir,
     shutdown: Option<oneshot::Sender<()>>,
@@ -271,20 +266,15 @@ impl TestServer {
         let app = Router::new()
             .fallback(any(dispatch))
             .with_state(state.clone());
-        let tcp = TcpListener::bind("127.0.0.1:0").await?;
-        let address = tcp.local_addr()?;
         let unix = UnixListener::bind(&socket)?;
+        install_push_hook(&state.git_dir, &socket)?;
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let tcp_app = app.clone();
-        let tcp_task = tokio::spawn(async move {
-            let _ = axum::serve(tcp, tcp_app)
+        let unix_task = tokio::spawn(async move {
+            let _ = axum::serve(unix, app)
                 .with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
                 })
                 .await;
-        });
-        let unix_task = tokio::spawn(async move {
-            let _ = axum::serve(unix, app).await;
         });
 
         fs::write(
@@ -298,11 +288,10 @@ impl TestServer {
 
         Ok(Self {
             state,
-            address,
             socket,
             config_dir,
             shutdown: Some(shutdown),
-            tasks: vec![tcp_task, unix_task],
+            tasks: vec![unix_task],
         })
     }
 
@@ -311,10 +300,7 @@ impl TestServer {
             "https://github.com/{}/{}",
             self.state.owner, self.state.repository
         );
-        let target = format!(
-            "http://{}/{}/{}",
-            self.address, self.state.owner, self.state.repository
-        );
+        let target = format!("file://{}", self.state.git_dir.display());
         command
             .env("GH_CONFIG_DIR", self.config_dir.path())
             .env("GH_TOKEN", "test-token")
@@ -327,10 +313,6 @@ impl TestServer {
 
     pub fn snapshot(&self) -> Snapshot {
         self.state.snapshot()
-    }
-
-    pub fn address(&self) -> std::net::SocketAddr {
-        self.address
     }
 
     pub fn socket(&self) -> &Path {
@@ -356,14 +338,31 @@ fn validate_name(kind: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn install_push_hook(git_dir: &Path, socket: &Path) -> Result<()> {
+    let path = git_dir.join("hooks/post-receive");
+    let socket = path_arg(socket)?;
+    let contents = format!(
+        "#!/bin/sh\ncurl --silent --show-error --fail --unix-socket {socket} --request POST http://localhost/_test/push >/dev/null\n"
+    );
+    fs::write(&path, contents)?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+fn path_arg(path: &Path) -> Result<String> {
+    let path = path.to_str().context("hook path is not UTF-8")?;
+    Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
+}
+
 async fn dispatch(
     State(state): State<AppState>,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    match dispatch_inner(&state, method, uri.path(), uri.query(), &headers, &body).await {
+    match dispatch_inner(&state, method, uri.path(), &body) {
         Ok(response) => response,
         Err((status, message)) => {
             (status, json!({ "message": message }).to_string()).into_response()
@@ -373,14 +372,11 @@ async fn dispatch(
 
 type HttpResult = Result<Response, (StatusCode, String)>;
 
-async fn dispatch_inner(
-    state: &AppState,
-    method: Method,
-    path: &str,
-    query: Option<&str>,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> HttpResult {
+fn dispatch_inner(state: &AppState, method: Method, path: &str, body: &[u8]) -> HttpResult {
+    if path == "/_test/push" && method == Method::POST {
+        detect_merged(state).map_err(internal)?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     if path == "/_test/state" && method == Method::GET {
         return json_response(
             StatusCode::OK,
@@ -393,10 +389,6 @@ async fn dispatch_inner(
     let api_prefix = format!("/repos/{}/{}", state.owner, state.repository);
     if let Some(rest) = path.strip_prefix(&api_prefix) {
         return rest_api(state, method, rest, body);
-    }
-    let git_prefix = format!("/{}/{}", state.owner, state.repository);
-    if let Some(git_path) = path.strip_prefix(&git_prefix) {
-        return git_http(state, method, git_path, query, headers, body).await;
     }
     Err((
         StatusCode::NOT_FOUND,
@@ -730,84 +722,7 @@ fn assign_stack(model: &mut Model, stack: u64, numbers: &[u64]) {
     }
 }
 
-async fn git_http(
-    state: &AppState,
-    method: Method,
-    path: &str,
-    query: Option<&str>,
-    _headers: &HeaderMap,
-    body: &[u8],
-) -> HttpResult {
-    let path = path.strip_prefix(".git").unwrap_or(path);
-    let (service, advertise) = match (method, path, query) {
-        (Method::GET, "/info/refs", Some("service=git-upload-pack")) => ("git-upload-pack", true),
-        (Method::GET, "/info/refs", Some("service=git-receive-pack")) => ("git-receive-pack", true),
-        (Method::POST, "/git-upload-pack", _) => ("git-upload-pack", false),
-        (Method::POST, "/git-receive-pack", _) => ("git-receive-pack", false),
-        _ => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("unimplemented git request {path}"),
-            ));
-        }
-    };
-    let git_dir = state.git_dir.clone();
-    let input = body.to_vec();
-    let service_owned = service.to_owned();
-    let output = tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
-        let mut command = Command::new("git");
-        command
-            .arg(service_owned.strip_prefix("git-").unwrap())
-            .arg("--stateless-rpc");
-        if advertise {
-            command.arg("--advertise-refs");
-        }
-        command
-            .arg(git_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        if !input.is_empty() {
-            child.stdin.take().unwrap().write_all(&input)?;
-        }
-        Ok(child.wait_with_output()?)
-    })
-    .await
-    .map_err(internal)?
-    .map_err(internal)?;
-    if !output.status.success() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
-    }
-    let mut bytes = Vec::new();
-    if advertise {
-        let announcement = format!("# service={service}\n");
-        bytes.extend(format!("{:04x}{announcement}", announcement.len() + 4).as_bytes());
-        bytes.extend(b"0000");
-    }
-    bytes.extend(output.stdout);
-    if service == "git-receive-pack" && !advertise {
-        detect_merged(state).await?;
-    }
-    let mut response = (StatusCode::OK, bytes).into_response();
-    response.headers_mut().insert(
-        "content-type",
-        HeaderValue::from_str(&format!(
-            "application/x-{service}-{}",
-            if advertise { "advertisement" } else { "result" }
-        ))
-        .unwrap(),
-    );
-    response
-        .headers_mut()
-        .insert("cache-control", HeaderValue::from_static("no-cache"));
-    Ok(response)
-}
-
-async fn detect_merged(state: &AppState) -> Result<(), (StatusCode, String)> {
+fn detect_merged(state: &AppState) -> Result<()> {
     let open_pull_requests: Vec<(u64, String, String)> = {
         let model = state.model.lock().unwrap();
         model
@@ -827,29 +742,22 @@ async fn detect_merged(state: &AppState) -> Result<(), (StatusCode, String)> {
         return Ok(());
     }
 
-    let git_dir = state.git_dir.clone();
-    let merged = tokio::task::spawn_blocking(move || -> Result<Vec<(u64, String, String)>> {
-        let mut merged = Vec::new();
-        for (number, head, base) in open_pull_requests {
-            let output = Command::new("git")
-                .args([
-                    "--git-dir",
-                    path(&git_dir)?,
-                    "merge-base",
-                    "--is-ancestor",
-                    &head,
-                    &base,
-                ])
-                .output()?;
-            if output.status.success() {
-                merged.push((number, head, base));
-            }
+    let mut merged = Vec::new();
+    for (number, head, base) in open_pull_requests {
+        let output = Command::new("git")
+            .args([
+                "--git-dir",
+                path(&state.git_dir)?,
+                "merge-base",
+                "--is-ancestor",
+                &head,
+                &base,
+            ])
+            .output()?;
+        if output.status.success() {
+            merged.push((number, head, base));
         }
-        Ok(merged)
-    })
-    .await
-    .map_err(internal)?
-    .map_err(internal)?;
+    }
 
     let mut model = state.model.lock().unwrap();
     for (number, head, base) in merged {
@@ -943,7 +851,6 @@ pub async fn serve(
     owner: String,
     repository: String,
     git_dir: PathBuf,
-    listen: &str,
     socket: &Path,
 ) -> Result<()> {
     validate_name("owner", &owner)?;
@@ -968,19 +875,12 @@ pub async fn serve(
     if socket.exists() {
         fs::remove_file(socket)?;
     }
-    let tcp = TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("could not listen on {listen}"))?;
     let unix = UnixListener::bind(socket)
         .with_context(|| format!("could not listen on {}", socket.display()))?;
-    println!(
-        "{{\"address\":\"{}\",\"socket\":\"{}\"}}",
-        tcp.local_addr()?,
-        socket.display()
-    );
+    install_push_hook(&state.git_dir, socket)?;
+    println!("{{\"socket\":\"{}\"}}", socket.display());
     let app = Router::new().fallback(any(dispatch)).with_state(state);
     tokio::select! {
-        result = axum::serve(tcp, app.clone()) => result?,
         result = axum::serve(unix, app) => result?,
         _ = tokio::signal::ctrl_c() => {},
     }
