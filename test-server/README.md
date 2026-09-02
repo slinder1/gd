@@ -6,6 +6,10 @@ This crate implements the GitHub behavior used by Praddle. It serves:
 * Smart Git HTTP fetches and atomic pushes over a loopback TCP socket for the real `git` CLI.
 * `GET /_test/state` for test assertions.
 
+After each successful receive-pack operation, the server marks every open pull
+request as merged when its head ref is reachable from its base ref, matching
+GitHub's behavior.
+
 Run it with a single repository identity and an existing bare Git repository:
 
 ```console

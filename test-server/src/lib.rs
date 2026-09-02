@@ -163,7 +163,9 @@ impl TestHarness {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.repository.git(args)
+        let mut command = self.command("git");
+        command.args(args);
+        checked_output(&mut command)
     }
 
     pub fn write(&self, relative_path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()> {
@@ -200,6 +202,10 @@ where
 {
     let mut command = Command::new("git");
     command.args(args).current_dir(directory);
+    checked_output(&mut command)
+}
+
+fn checked_output(command: &mut Command) -> Result<Output> {
     let output = command
         .output()
         .with_context(|| format!("could not execute {command:?}"))?;
@@ -783,6 +789,9 @@ async fn git_http(
         bytes.extend(b"0000");
     }
     bytes.extend(output.stdout);
+    if service == "git-receive-pack" && !advertise {
+        detect_merged(state).await?;
+    }
     let mut response = (StatusCode::OK, bytes).into_response();
     response.headers_mut().insert(
         "content-type",
@@ -796,6 +805,71 @@ async fn git_http(
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-cache"));
     Ok(response)
+}
+
+async fn detect_merged(state: &AppState) -> Result<(), (StatusCode, String)> {
+    let open_pull_requests: Vec<(u64, String, String)> = {
+        let model = state.model.lock().unwrap();
+        model
+            .pull_requests
+            .values()
+            .filter(|pr| pr.state == "OPEN")
+            .map(|pr| {
+                (
+                    pr.number,
+                    branch_ref(&pr.head_ref_name),
+                    branch_ref(&pr.base_ref_name),
+                )
+            })
+            .collect()
+    };
+    if open_pull_requests.is_empty() {
+        return Ok(());
+    }
+
+    let git_dir = state.git_dir.clone();
+    let merged = tokio::task::spawn_blocking(move || -> Result<Vec<(u64, String, String)>> {
+        let mut merged = Vec::new();
+        for (number, head, base) in open_pull_requests {
+            let output = Command::new("git")
+                .args([
+                    "--git-dir",
+                    path(&git_dir)?,
+                    "merge-base",
+                    "--is-ancestor",
+                    &head,
+                    &base,
+                ])
+                .output()?;
+            if output.status.success() {
+                merged.push((number, head, base));
+            }
+        }
+        Ok(merged)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+
+    let mut model = state.model.lock().unwrap();
+    for (number, head, base) in merged {
+        if let Some(pr) = model.pull_requests.get_mut(&number)
+            && pr.state == "OPEN"
+            && branch_ref(&pr.head_ref_name) == head
+            && branch_ref(&pr.base_ref_name) == base
+        {
+            pr.state = "MERGED".into();
+        }
+    }
+    Ok(())
+}
+
+fn branch_ref(name: &str) -> String {
+    if name.starts_with("refs/") {
+        name.to_owned()
+    } else {
+        format!("refs/heads/{name}")
+    }
 }
 
 fn json_response(status: StatusCode, value: &Value) -> HttpResult {
