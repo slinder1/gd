@@ -1,12 +1,12 @@
 // Copyright © 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-use crate::change::{AnyChange, LocalChange};
+use crate::change::{AnyChange, Change, LocalChange};
 use crate::env;
 use crate::util::{exec, print_cmd_and_files};
 use anyhow::{Context, Result, bail};
 use git2::{Oid, Repository};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::process::Command;
 
 pub struct RemoteRefs {
@@ -101,6 +101,8 @@ struct BranchUpdate {
 
 pub struct PublicationPlan {
     updates: Vec<BranchUpdate>,
+    bases: Vec<String>,
+    moving_earlier: HashSet<String>,
 }
 
 impl PublicationPlan {
@@ -121,7 +123,25 @@ impl PublicationPlan {
             });
             parent_oid = new_oid;
         }
-        Ok(Self { updates })
+        let bases = desired_bases(changes);
+        let moving_earlier = changes_moving_earlier(changes)?;
+        Ok(Self {
+            updates,
+            bases,
+            moving_earlier,
+        })
+    }
+
+    pub fn has_changes_moving_earlier(&self) -> bool {
+        !self.moving_earlier.is_empty()
+    }
+
+    pub fn is_moving_earlier(&self, change_id: &str) -> bool {
+        self.moving_earlier.contains(change_id)
+    }
+
+    pub fn bases(&self) -> &[String] {
+        &self.bases
     }
 
     pub fn push(&self) -> Result<()> {
@@ -145,6 +165,70 @@ impl PublicationPlan {
         }
         Ok(())
     }
+}
+
+fn desired_bases(changes: &[AnyChange]) -> Vec<String> {
+    changes
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            changes[index + 1..]
+                .first()
+                .map(|change| change.local_change().remote_branch())
+                .unwrap_or_else(|| env::get().base_branch().to_owned())
+        })
+        .collect()
+}
+
+fn changes_moving_earlier(changes: &[AnyChange]) -> Result<HashSet<String>> {
+    let existing: Vec<&Change> = changes
+        .iter()
+        .filter_map(|change| match change {
+            AnyChange::Change(change) => Some(change),
+            AnyChange::LocalChange(_) => None,
+        })
+        .collect();
+    let old_ranks = old_stack_ranks(&existing)?;
+    Ok(existing
+        .iter()
+        .rev()
+        .enumerate()
+        .filter(|(new_rank, change)| new_rank < &old_ranks[&change.local_change.id])
+        .map(|(_, change)| change.local_change.id.clone())
+        .collect())
+}
+
+fn old_stack_ranks(changes: &[&Change]) -> Result<HashMap<String, usize>> {
+    if changes.iter().all(|change| change.pr.stack_entry.is_some()) {
+        let mut old_order = changes.to_vec();
+        old_order.sort_unstable_by_key(|change| change.pr.stack_entry.as_ref().unwrap().position);
+        return Ok(old_order
+            .into_iter()
+            .enumerate()
+            .map(|(rank, change)| (change.local_change.id.clone(), rank))
+            .collect());
+    }
+
+    let by_branch: HashMap<String, &Change> = changes
+        .iter()
+        .map(|change| (change.local_change.remote_branch(), *change))
+        .collect();
+    changes
+        .iter()
+        .map(|change| {
+            let mut position = 0;
+            let mut base = change.pr.base_ref_name.as_str();
+            let mut seen = HashSet::new();
+            while let Some(parent) = by_branch.get(base) {
+                if !seen.insert(base) {
+                    bail!("cycle in existing PR base branches at {base}");
+                }
+                position += 1;
+                base = &parent.pr.base_ref_name;
+            }
+            Ok((change.local_change.id.clone(), position))
+        })
+        .collect()
 }
 
 fn plan_commit(

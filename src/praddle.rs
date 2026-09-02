@@ -10,7 +10,6 @@ use crate::util::Extract;
 use anyhow::{Context, Result, bail};
 use git2::Repository;
 use rayon::prelude::*;
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -79,8 +78,7 @@ fn push(args: &cli::Push) -> Result<()> {
         .context("could not build diffs")?;
     let publication = PublicationPlan::build(&any_changes, &remote_refs)
         .context("could not plan branch updates")?;
-    let has_cycles = detect_cycles(&any_changes);
-    if has_cycles {
+    if publication.has_changes_moving_earlier() {
         let stacked_prs: Vec<&Pr> = any_changes
             .iter()
             .filter_map(|any_change| match any_change {
@@ -88,7 +86,7 @@ fn push(args: &cli::Push) -> Result<()> {
                 AnyChange::LocalChange(_) => None,
             })
             .collect();
-        gh::remove_stack(&stacked_prs).context("could not remove pr stack for rebase")?;
+        gh::remove_stack(&stacked_prs).context("could not remove reordered pr stack")?;
         for any_change in any_changes.iter_mut() {
             if let AnyChange::Change(change) = any_change {
                 change.pr.stack = None;
@@ -96,7 +94,7 @@ fn push(args: &cli::Push) -> Result<()> {
             }
         }
     }
-    if has_cycles || args.draft {
+    if args.draft {
         any_changes
             .par_iter_mut()
             .filter_map(|ac| {
@@ -108,21 +106,28 @@ fn push(args: &cli::Push) -> Result<()> {
             })
             .map(|c| {
                 c.pr.mark_ready(false)
-                    .with_context(|| format!("could not mark pr as draft: {:?}", c.pr))?;
-                // FIXME: This is pretty coarse-grained, could find the minimal set.
-                if has_cycles {
-                    c.pr.set_base(env.base_branch()).with_context(|| {
-                        format!(
-                            "could not retarget pr {} to base branch: {:?}",
-                            c.pr.number,
-                            env.base_branch(),
-                        )
-                    })?;
-                }
-                Ok(())
+                    .with_context(|| format!("could not mark pr as draft: {:?}", c.pr))
             })
             .collect::<Result<Vec<_>>>()?;
     }
+    any_changes
+        .par_iter_mut()
+        .filter_map(|change| match change {
+            AnyChange::Change(change) if publication.is_moving_earlier(&change.local_change.id) => {
+                Some(change)
+            }
+            _ => None,
+        })
+        .map(|change| {
+            change.pr.set_base(env.base_branch()).with_context(|| {
+                format!(
+                    "could not retarget pr {} to base branch: {:?}",
+                    change.pr.number,
+                    env.base_branch(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     publication
         .push()
         .context("could not publish local changes")?;
@@ -141,20 +146,9 @@ fn push(args: &cli::Push) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()
         .context("could not create new prs")?;
-    let bases: Vec<String> = changes
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            changes[i + 1..]
-                .iter()
-                .next()
-                .map(|p| p.local_change.remote_branch())
-                .unwrap_or_else(|| env.base_branch().to_owned())
-        })
-        .collect();
     changes
         .par_iter_mut()
-        .zip(bases.par_iter())
+        .zip(publication.bases().par_iter())
         .map(|(c, base)| {
             if c.pr.base_ref_name != base.as_str() {
                 if c.pr.stack.is_some() {
@@ -173,7 +167,7 @@ fn push(args: &cli::Push) -> Result<()> {
             Ok(())
         })
         .collect::<Result<Vec<_>>>()
-        .context("could not set pr bases and bodies")?;
+        .context("could not set pr bases")?;
     gh::reconcile_stack(&changes.iter().map(|change| &change.pr).collect::<Vec<_>>())
         .context("could not reconcile pr stack")?;
     changes
@@ -211,21 +205,6 @@ fn push(args: &cli::Push) -> Result<()> {
             .context("could not mark prs as ready")?;
     }
     Ok(())
-}
-
-fn detect_cycles(any_changes: &[AnyChange]) -> bool {
-    let mut parent_refs_seen: HashSet<String> = HashSet::new();
-    for any_change in any_changes.iter() {
-        if let AnyChange::Change(change) = any_change {
-            if !parent_refs_seen.is_empty()
-                && !parent_refs_seen.contains(&change.local_change.remote_branch())
-            {
-                return true;
-            }
-            parent_refs_seen.insert(change.pr.base_ref_name.clone());
-        }
-    }
-    false
 }
 
 fn url(_args: &cli::Url) -> Result<()> {
