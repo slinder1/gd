@@ -10,6 +10,12 @@ fn initial_comment(path: &str, contents: &str) -> String {
     )
 }
 
+fn interdiff_comment(path: &str, before: &str, after: &str) -> String {
+    format!(
+        "<details>\n<summary>🛠️ Changes since last version (click to expand):</summary>\n\n```diff\ndiff --git b/{path} a/{path}\n@@ -1 +1 @@\n-{before}\n+{after}\n\n```\n</details>"
+    )
+}
+
 fn push(harness: &TestHarness) {
     let mut command = harness.command(env!("CARGO_BIN_EXE_praddle"));
     command.args([
@@ -168,6 +174,73 @@ async fn extends_a_stack_with_two_changes_in_one_push() {
     assert_eq!(second.base_ref_name, "users/alice/I0001");
     assert_eq!(second.comments, [initial_comment("second", "second")]);
     assert_eq!(second.stack_position, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_a_change_when_it_is_edited_and_pushed_again() {
+    let harness = TestHarness::start("alice", "widgets").await.unwrap();
+    harness.write("change", "before\n").unwrap();
+    harness.git(["add", "change"]).unwrap();
+    harness
+        .git([
+            "commit",
+            "-m",
+            "Initial title",
+            "-m",
+            "Initial body",
+            "-m",
+            "Change-Id: I0001",
+        ])
+        .unwrap();
+
+    push(&harness);
+
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot.stacks, [(1, vec![1])].into());
+    assert_eq!(snapshot.pull_requests.len(), 1);
+    let change = &snapshot.pull_requests[0];
+    assert_eq!(change.title, "Initial title");
+    assert_eq!(change.body, "Initial body\n\nChange-Id: I0001");
+    assert_eq!(change.base_ref_name, "main");
+    assert_eq!(change.head_ref_name, "refs/heads/users/alice/I0001");
+    assert_eq!(change.comments, [initial_comment("change", "before")]);
+    assert_eq!(change.stack, Some(1));
+    assert_eq!(change.stack_position, Some(0));
+
+    harness.write("change", "after\n").unwrap();
+    harness.git(["add", "change"]).unwrap();
+    harness
+        .git([
+            "commit",
+            "--amend",
+            "-m",
+            "Updated title",
+            "-m",
+            "Updated body",
+            "-m",
+            "Change-Id: I0001",
+        ])
+        .unwrap();
+
+    push(&harness);
+
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot.stacks, [(1, vec![1])].into());
+    assert_eq!(snapshot.pull_requests.len(), 1);
+    let change = &snapshot.pull_requests[0];
+    assert_eq!(change.title, "Updated title");
+    assert_eq!(change.body, "Updated body\n\nChange-Id: I0001");
+    assert_eq!(change.base_ref_name, "main");
+    assert_eq!(change.head_ref_name, "refs/heads/users/alice/I0001");
+    assert_eq!(
+        change.comments,
+        [
+            initial_comment("change", "before"),
+            interdiff_comment("change", "before", "after"),
+        ]
+    );
+    assert_eq!(change.stack, Some(1));
+    assert_eq!(change.stack_position, Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
