@@ -77,14 +77,8 @@ fn validate_pr_refs(changes: &[AnyChange], refs: &HashMap<String, Oid>) -> Resul
                     change.pr.head_ref_name
                 );
             }
-            if !refs.contains_key(&head_ref) {
-                bail!(
-                    "remote branch for pr {} does not exist: {head_ref}",
-                    change.pr.number
-                );
-            }
             let old_base_ref = branch_ref(&change.pr.base_ref_name);
-            if !refs.contains_key(&old_base_ref) {
+            if refs.contains_key(&head_ref) && !refs.contains_key(&old_base_ref) {
                 bail!(
                     "base branch for pr {} does not exist: {old_base_ref}",
                     change.pr.number
@@ -146,27 +140,96 @@ impl PublicationPlan {
         &self.bases
     }
 
-    pub fn push(&self) -> Result<()> {
-        let refspecs: Vec<String> = self
+    pub fn push(&self) -> Result<PublishedRefs> {
+        let updates: Vec<&BranchUpdate> = self
             .updates
             .iter()
             .filter(|update| update.old_oid != Some(update.new_oid))
-            .map(|update| format!("{}:{}", update.new_oid, update.reference))
             .collect();
-        if refspecs.is_empty() {
-            return Ok(());
+        if updates.is_empty() {
+            return Ok(PublishedRefs { rollback: None });
         }
 
+        let remote_url = env::get().remote_url()?;
         let mut command = Command::new("git");
-        command.args(["push", "--atomic", &env::get().remote_url()?]);
-        command.args(refspecs);
+        command.args(["push", "--atomic", &remote_url]);
+        command.args(
+            updates
+                .iter()
+                .map(|update| format!("{}:{}", update.new_oid, update.reference)),
+        );
         if env::get().dry_run() {
             print_cmd_and_files(&command, std::iter::empty())?;
+            return Ok(PublishedRefs { rollback: None });
         } else {
             exec(&mut command)?;
         }
+        Ok(PublishedRefs {
+            rollback: Some(Rollback {
+                remote_url,
+                refs: updates
+                    .into_iter()
+                    .map(|update| RefRestore {
+                        reference: update.reference.clone(),
+                        old_oid: update.old_oid,
+                        new_oid: update.new_oid,
+                    })
+                    .collect(),
+            }),
+        })
+    }
+}
+
+#[must_use = "published refs are rolled back unless committed"]
+pub struct PublishedRefs {
+    rollback: Option<Rollback>,
+}
+
+impl PublishedRefs {
+    pub fn commit(mut self) {
+        self.rollback = None;
+    }
+}
+
+impl Drop for PublishedRefs {
+    fn drop(&mut self) {
+        let Some(rollback) = self.rollback.take() else {
+            return;
+        };
+        if let Err(error) = rollback.restore() {
+            eprintln!("warning: could not restore published refs: {error:#}");
+        }
+    }
+}
+
+struct Rollback {
+    remote_url: String,
+    refs: Vec<RefRestore>,
+}
+
+impl Rollback {
+    fn restore(self) -> Result<()> {
+        let mut command = Command::new("git");
+        command.args(["push", "--atomic", &self.remote_url]);
+        for restore in &self.refs {
+            command.arg(format!(
+                "--force-with-lease={}:{}",
+                restore.reference, restore.new_oid
+            ));
+        }
+        command.args(self.refs.iter().map(|restore| match restore.old_oid {
+            Some(old_oid) => format!("{old_oid}:{}", restore.reference),
+            None => format!(":{}", restore.reference),
+        }));
+        exec(&mut command).context("rollback push failed")?;
         Ok(())
     }
+}
+
+struct RefRestore {
+    reference: String,
+    old_oid: Option<Oid>,
+    new_oid: Oid,
 }
 
 fn desired_bases(changes: &[AnyChange]) -> Vec<String> {
