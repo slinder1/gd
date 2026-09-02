@@ -314,6 +314,13 @@ async fn restores_remote_refs_when_pr_reconciliation_fails() {
     harness
         .git(["push", "origin", "refs/heads/main:refs/heads/auxiliary"])
         .unwrap();
+    let mut unstack = harness.command("gh");
+    unstack.args([
+        "api",
+        "--method=POST",
+        "repos/alice/widgets/stacks/1/unstack",
+    ]);
+    assert!(unstack.output().unwrap().status.success());
     let mut edit = harness.command("gh");
     edit.args([
         "pr",
@@ -337,6 +344,7 @@ async fn restores_remote_refs_when_pr_reconciliation_fails() {
         ])
         .unwrap();
 
+    harness.server().fail_next_base_update();
     let failed = push_output(&harness);
     assert!(!failed.status.success());
     assert_eq!(
@@ -346,13 +354,6 @@ async fn restores_remote_refs_when_pr_reconciliation_fails() {
         Some(old_head.clone())
     );
 
-    let mut unstack = harness.command("gh");
-    unstack.args([
-        "api",
-        "--method=POST",
-        "repos/alice/widgets/stacks/1/unstack",
-    ]);
-    assert!(unstack.output().unwrap().status.success());
     push(&harness);
 
     let new_head = harness
@@ -712,6 +713,81 @@ async fn only_temporarily_retargets_changes_moving_earlier() {
             _ => unreachable!(),
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unstacks_before_inserting_a_change_between_existing_prs() {
+    let harness = TestHarness::start("alice", "widgets").await.unwrap();
+    for (path, title, change_id) in [("first", "First", "I0001"), ("third", "Third", "I0003")] {
+        harness.write(path, format!("{path}\n")).unwrap();
+        harness.git(["add", path]).unwrap();
+        harness
+            .git([
+                "commit",
+                "-m",
+                title,
+                "-m",
+                &format!("Change-Id: {change_id}"),
+            ])
+            .unwrap();
+    }
+    push(&harness);
+    let before = harness.snapshot();
+
+    harness.git(["reset", "--hard", "HEAD~2"]).unwrap();
+    for (path, title, change_id) in [
+        ("first", "First", "I0001"),
+        ("second", "Second", "I0002"),
+        ("third", "Third", "I0003"),
+    ] {
+        harness.write(path, format!("{path}\n")).unwrap();
+        harness.git(["add", path]).unwrap();
+        harness
+            .git([
+                "commit",
+                "-m",
+                title,
+                "-m",
+                &format!("Change-Id: {change_id}"),
+            ])
+            .unwrap();
+    }
+
+    push(&harness);
+
+    let after = harness.snapshot();
+    assert_eq!(after.stacks, [(2, vec![2, 3, 1])].into());
+    let old_first = before
+        .pull_requests
+        .iter()
+        .find(|pr| pr.title == "First")
+        .unwrap();
+    let old_third = before
+        .pull_requests
+        .iter()
+        .find(|pr| pr.title == "Third")
+        .unwrap();
+    let first = after
+        .pull_requests
+        .iter()
+        .find(|pr| pr.title == "First")
+        .unwrap();
+    let second = after
+        .pull_requests
+        .iter()
+        .find(|pr| pr.title == "Second")
+        .unwrap();
+    let third = after
+        .pull_requests
+        .iter()
+        .find(|pr| pr.title == "Third")
+        .unwrap();
+    assert_eq!(first.base_ref_history, old_first.base_ref_history);
+    assert_eq!(second.base_ref_history, ["main", "users/alice/I0001"]);
+    assert_eq!(
+        &third.base_ref_history[old_third.base_ref_history.len()..],
+        ["users/alice/I0002"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

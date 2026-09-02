@@ -3,6 +3,7 @@
 
 use crate::change::{AnyChange, Change, LocalChange};
 use crate::env;
+use crate::gh::{self, Pr};
 use crate::util::{exec, print_cmd_and_files};
 use anyhow::{Context, Result, bail};
 use git2::{Oid, Repository};
@@ -99,6 +100,8 @@ pub struct PublicationPlan {
     updates: Vec<BranchUpdate>,
     bases: Vec<String>,
     moving_earlier: HashSet<String>,
+    stack: gh::StackPlan,
+    requires_unstack: bool,
 }
 
 impl PublicationPlan {
@@ -121,23 +124,69 @@ impl PublicationPlan {
         }
         let bases = desired_bases(changes);
         let moving_earlier = changes_moving_earlier(changes)?;
+        let existing_prs: Vec<&Pr> = changes
+            .iter()
+            .filter_map(|change| match change {
+                AnyChange::Change(change) => Some(&change.pr),
+                AnyChange::LocalChange(_) => None,
+            })
+            .collect();
+        let stack = gh::StackPlan::inspect(&existing_prs)?;
+        let desired_existing: Vec<(&Pr, &str)> = changes
+            .iter()
+            .zip(&bases)
+            .filter_map(|(change, base)| match change {
+                AnyChange::Change(change) => Some((&change.pr, base.as_str())),
+                AnyChange::LocalChange(_) => None,
+            })
+            .collect();
+        let requires_unstack = stack.requires_unstack(&desired_existing);
         Ok(Self {
             updates,
             bases,
             moving_earlier,
+            stack,
+            requires_unstack,
         })
     }
 
-    pub fn has_changes_moving_earlier(&self) -> bool {
-        !self.moving_earlier.is_empty()
-    }
-
-    pub fn is_moving_earlier(&self, change_id: &str) -> bool {
-        self.moving_earlier.contains(change_id)
+    pub fn prepare_stack(&mut self, changes: &mut [AnyChange]) -> Result<()> {
+        if self.requires_unstack {
+            self.stack.unstack().context("could not unstack prs")?;
+            for change in changes.iter_mut() {
+                if let AnyChange::Change(change) = change {
+                    change.pr.stack = None;
+                    change.pr.stack_entry = None;
+                }
+            }
+        }
+        for change in changes.iter_mut() {
+            let AnyChange::Change(change) = change else {
+                continue;
+            };
+            if self.moving_earlier.contains(&change.local_change.id) {
+                change
+                    .pr
+                    .set_base(env::get().base_branch())
+                    .with_context(|| {
+                        format!(
+                            "could not retarget pr {} to base branch: {:?}",
+                            change.pr.number,
+                            env::get().base_branch(),
+                        )
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     pub fn bases(&self) -> &[String] {
         &self.bases
+    }
+
+    pub fn reconcile_stack(self, changes: &[Change]) -> Result<()> {
+        self.stack
+            .reconcile(&changes.iter().map(|change| &change.pr).collect::<Vec<_>>())
     }
 
     pub fn push(&self) -> Result<PublishedRefs> {

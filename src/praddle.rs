@@ -76,24 +76,9 @@ fn push(args: &cli::Push) -> Result<()> {
         .map(|change| change.diff(&remote_refs))
         .collect::<Result<Vec<_>>>()
         .context("could not build diffs")?;
-    let publication = PublicationPlan::build(&any_changes, &remote_refs)
+    let mut publication = PublicationPlan::build(&any_changes, &remote_refs)
         .context("could not plan branch updates")?;
-    if publication.has_changes_moving_earlier() {
-        let stacked_prs: Vec<&Pr> = any_changes
-            .iter()
-            .filter_map(|any_change| match any_change {
-                AnyChange::Change(change) => Some(&change.pr),
-                AnyChange::LocalChange(_) => None,
-            })
-            .collect();
-        gh::remove_stack(&stacked_prs).context("could not remove reordered pr stack")?;
-        for any_change in any_changes.iter_mut() {
-            if let AnyChange::Change(change) = any_change {
-                change.pr.stack = None;
-                change.pr.stack_entry = None;
-            }
-        }
-    }
+    publication.prepare_stack(&mut any_changes)?;
     if args.draft {
         any_changes
             .par_iter_mut()
@@ -110,24 +95,6 @@ fn push(args: &cli::Push) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
     }
-    any_changes
-        .par_iter_mut()
-        .filter_map(|change| match change {
-            AnyChange::Change(change) if publication.is_moving_earlier(&change.local_change.id) => {
-                Some(change)
-            }
-            _ => None,
-        })
-        .map(|change| {
-            change.pr.set_base(env.base_branch()).with_context(|| {
-                format!(
-                    "could not retarget pr {} to base branch: {:?}",
-                    change.pr.number,
-                    env.base_branch(),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
     let published_refs = publication
         .push()
         .context("could not publish local changes")?;
@@ -150,25 +117,17 @@ fn push(args: &cli::Push) -> Result<()> {
         .par_iter_mut()
         .zip(publication.bases().par_iter())
         .map(|(c, base)| {
-            if c.pr.base_ref_name != base.as_str() {
-                if c.pr.stack.is_some() {
-                    bail!(
-                        "cannot retarget pr {} while it is part of a stack",
-                        c.pr.number
-                    );
-                }
-                c.pr.set_base(base.as_ref()).with_context(|| {
-                    format!(
-                        "could not retarget pr {} to branch: {:?}",
-                        c.pr.number, base,
-                    )
-                })?;
-            }
-            Ok(())
+            c.pr.set_base(base.as_ref()).with_context(|| {
+                format!(
+                    "could not retarget pr {} to branch: {:?}",
+                    c.pr.number, base,
+                )
+            })
         })
         .collect::<Result<Vec<_>>>()
         .context("could not set pr bases")?;
-    gh::reconcile_stack(&changes.iter().map(|change| &change.pr).collect::<Vec<_>>())
+    publication
+        .reconcile_stack(&changes)
         .context("could not reconcile pr stack")?;
     changes
         .par_iter_mut()
