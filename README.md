@@ -24,9 +24,10 @@ deal with what I perceive as design defects in their model.
 
 The `praddle-test-server` workspace crate provides a minimal, stateful GitHub
 implementation for integration tests. It serves the GraphQL and REST operations
-used by Praddle over a Unix socket and a single bare repository using Git smart
-HTTP. This lets tests invoke the real `gh`, `git`, and `praddle` executables
-without accessing GitHub or changing the user's configuration.
+used by Praddle over a Unix socket and redirects Git operations directly to a
+local bare repository. This lets tests invoke the real `gh`, `git`, and
+`praddle` executables without accessing GitHub or changing the user's
+configuration.
 
 Run the suite with `cargo test --workspace`. See `test-server/README.md` for
 standalone server usage.
