@@ -340,6 +340,10 @@ async fn updates_a_change_when_it_is_edited_and_pushed_again() {
         harness.commit_tree_oid(&old_remote_head).unwrap(),
         git_stdout(&harness, &["rev-parse", "HEAD^{tree}"])
     );
+    assert_eq!(
+        harness.commit_message(&old_remote_head).unwrap(),
+        "synthetic-praddle-commit"
+    );
 
     harness.write("change", "after\n").unwrap();
     harness.git(["add", "change"]).unwrap();
@@ -393,6 +397,10 @@ async fn updates_a_change_when_it_is_edited_and_pushed_again() {
     assert_eq!(
         harness.commit_tree_oid(&new_remote_head).unwrap(),
         git_stdout(&harness, &["rev-parse", "HEAD^{tree}"])
+    );
+    assert_eq!(
+        harness.commit_message(&new_remote_head).unwrap(),
+        "synthetic-praddle-commit"
     );
 
     push(&harness);
