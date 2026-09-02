@@ -15,16 +15,30 @@ A backronym might be "Pull Request, Add (Little Endian)".
 It is unfortunate that this tool needs to exist at all, and even more
 unfortunate that I don't have the time to dedicate to doing it right.
 
-All development up to commit 0948335884fcb2645ada3985ff4c05dcf075b4f2 (v0.10.0)
-was done by hand without LLMs, but at the point when GitHub rolled out their
-(rather poor) support for stacks as a reified concept, I started using LLMs to
-deal with what I perceive as design defects in their model.
+All development up to commit 0948335884fcb2645ada3985ff4c05dcf075b4f2 (tag
+v0.10.0) was done by hand without LLMs, but at the point when GitHub rolled out
+their (rather poor) support for stacks as a reified concept, I started using
+LLMs to deal with what I perceived as design defects in their model that I
+don't have the time or energy to slog through papering over, but which I have
+to interact with day-to-day.
+
+Ultimately I was pointed to https://github.com/ezyang/ghstack which showed me I
+was wrong about how GH renders merge-based ff-only stacks, and so I ended up
+using LLMs to "port" praddle to the approach used in ghstack. Many thanks to
+the devs of that tool. I would just be using ghstack if not for a lot of other
+aesthetic and workflow issues I have with its design, at least for my own
+personal use.
+
+Ultimately I would consider `praddle` to be a vibecoded hack now, although
+I have at least looked at all of the code and nudged it towards being
+readable.
 
 # Testing
 
 The `praddle-test-server` workspace crate provides a minimal, stateful GitHub
-implementation for integration tests. It serves the GraphQL and REST operations
-used by Praddle over a Unix socket and redirects Git operations directly to a
+implementation for integration tests, originally based on the approach
+in [ghstack's github_fake](https://github.com/ezyang/ghstack/blob/f4e9df551eda204bc95b4329870ea304bd20fbb0/src/ghstack/github_fake.py). It serves the GraphQL and REST operations
+used by praddle over a Unix socket and redirects Git operations directly to a
 local bare repository. This lets tests invoke the real `gh`, `git`, and
 `praddle` executables without accessing GitHub or changing the user's
 configuration.
@@ -33,6 +47,23 @@ Run the suite with `cargo test --workspace`. See `test-server/README.md` for
 standalone server usage.
 
 # Alternatives
+
+## `ghstack`
+
+If you're here, you probably can just use `ghstack` instead of praddle. My
+beefs with `ghstack` are only:
+
+* That it seems kind of Meta-centric, with some hard-coded Meta-isms in the
+  codebase.
+* It also has support for interacting with CI and a few other things that I
+  don't need a tool for stacking PRs to touch.
+* It will modify commits for you, outside of a Gerrit-like commit-msg hook.
+* It uses a lot of redundant commit message trailers. It seems like it does
+  this as sort of a cache to avoid some GH API queries sometimes (?) unclear,
+  but I don't like them.
+
+Otherwise, `ghstack` seems to do everything right, and in a principled way. It
+is probably the better choice if you don't mind the above caveats.
 
 ## `spr`
 
